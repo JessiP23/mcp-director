@@ -1,0 +1,355 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import secrets
+import time
+import uuid
+import inspect
+from typing import Any
+from urllib.parse import quote, urlparse, urlunparse
+
+import httpx
+import structlog
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from jose import JWTError, jwt
+from redis.asyncio import Redis
+
+from src.config import Settings, get_settings
+
+log = structlog.get_logger(__name__)
+
+CODE_TTL = 600
+PKCE_PENDING_TTL = 600
+CLIENT_TTL = 86400 * 365
+
+class AuthConfigError(RuntimeError):
+    pass
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+def verify_pkce(code_verifier: str, code_challenge: str) -> bool:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    expected = _b64url_encode(digest)
+    return secrets.compare_digest(expected, code_challenge)
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def create_mcp_access_token(
+    *,
+    settings: Settings,
+    user_id: str,
+    scopes: list[str],
+) -> tuple[str, int]:
+    now = int(time.time())
+    exp = now + settings.token_ttl_seconds
+    payload = {
+        "sub": user_id,
+        "aud": settings.mcp_audience,
+        "iat": now,
+        "exp": exp,
+        "scopes": scopes,
+    }
+    token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return token, settings.token_ttl_seconds
+
+def create_test_token(
+    *,
+    user_id: str = "test-user",
+    scopes: list[str] | None = None,
+    secret: str | None = None,
+    algorithm: str = "HS256",
+    audience: str = "director-mcp",
+    expires_in: int = 3600,
+) -> str:
+    """JWT helper for tests (same shape as production tokens)."""
+    settings = get_settings()
+    now = int(time.time())
+    payload = {
+        "sub": user_id,
+        "aud": audience,
+        "iat": now,
+        "exp": now + expires_in,
+        "scopes": scopes or ["pipeline:read", "pipeline:write", "assets:read"],
+    }
+    return jwt.encode(
+        payload,
+        secret or settings.jwt_secret,
+        algorithm=algorithm,
+    )
+
+async def validate_mcp_token(token: str, *, redis: Redis | None = None) -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        claims = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            audience=settings.mcp_audience,
+        )
+    except JWTError as e:
+        raise ValueError("invalid token") from e
+    th = _token_hash(token)
+    if redis:
+        revoked = await redis.sismember("mcp:tokens:revoked", th)  # type: ignore[misc]
+        if revoked:
+            raise ValueError("token revoked")
+    if "sub" not in claims:
+        raise ValueError("invalid subject")
+    scopes = claims.get("scopes")
+    if isinstance(scopes, str):
+        scopes_list = scopes.split()
+    elif isinstance(scopes, list):
+        scopes_list = [str(s) for s in scopes]
+    else:
+        scopes_list = []
+    return {"user_id": str(claims["sub"]), "scopes": scopes_list, "raw": claims}
+
+def _ensure_https_production(request: Request, settings: Settings) -> None:
+    if settings.environment != "production" and not settings.enforce_https:
+        return
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    if proto != "https":
+        raise HTTPException(status_code=400, detail="HTTPS required")
+
+def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
+    router = APIRouter()
+
+    async def redis_client() -> Redis:
+        if redis_factory is not None:
+            r = redis_factory()
+            if inspect.isawaitable(r):
+                return await r
+            return r
+        return Redis.from_url(get_settings().redis_url, decode_responses=True)
+
+    @router.get("/.well-known/oauth-protected-resource")
+    async def protected_resource_metadata(request: Request):
+        settings = get_settings()
+        _ensure_https_production(request, settings)
+        base = settings.mcp_base_url.rstrip("/")
+        return JSONResponse(
+            {
+                "resource": f"{base}/mcp",
+                "authorization_servers": [base],
+                "bearer_methods_supported": ["header"],
+                "scopes_supported": [
+                    "pipeline:read",
+                    "pipeline:write",
+                    "assets:read",
+                ],
+            }
+        )
+
+    @router.get("/.well-known/oauth-authorization-server")
+    async def authorization_server_metadata(request: Request):
+        settings = get_settings()
+        _ensure_https_production(request, settings)
+        base = settings.mcp_base_url.rstrip("/")
+        return JSONResponse(
+            {
+                "issuer": base,
+                "authorization_endpoint": f"{base}/oauth/authorize",
+                "token_endpoint": f"{base}/oauth/token",
+                "registration_endpoint": f"{base}/oauth/register",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code"],
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["none"],
+                "scopes_supported": [
+                    "pipeline:read",
+                    "pipeline:write",
+                    "assets:read",
+                ],
+            }
+        )
+
+    @router.get("/oauth/authorize")
+    async def oauth_authorize(request: Request):
+        settings = get_settings()
+        _ensure_https_production(request, settings)
+        q = request.query_params
+        client_id = q.get("client_id")
+        redirect_uri = q.get("redirect_uri")
+        state = q.get("state")
+        code_challenge = q.get("code_challenge")
+        code_challenge_method = q.get("code_challenge_method")
+        if not client_id or not redirect_uri or not state or not code_challenge:
+            raise HTTPException(status_code=400, detail="missing required parameters")
+        if code_challenge_method != "S256":
+            raise HTTPException(status_code=400, detail="only S256 is supported")
+        if not settings.supabase_anon_key:
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+
+        redis = await redis_client()
+        bridge = secrets.token_urlsafe(32)
+        pending = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "client_state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+        }
+        await redis.setex(
+            f"oauth:pkce:pending:{bridge}",
+            PKCE_PENDING_TTL,
+            json.dumps(pending),
+        )
+
+        callback = f"{settings.mcp_base_url.rstrip('/')}/oauth/callback"
+        supabase_authorize = (
+            f"{settings.supabase_url.rstrip('/')}/auth/v1/authorize"
+            f"?provider={quote(settings.supabase_oauth_provider)}"
+            f"&redirect_to={quote(callback, safe='')}"
+            f"&state={quote(bridge, safe='')}"
+        )
+        return RedirectResponse(supabase_authorize, status_code=302)
+
+    @router.get("/oauth/callback")
+    async def oauth_supabase_callback(request: Request, code: str | None = None, state: str | None = None):
+        settings = get_settings()
+        _ensure_https_production(request, settings)
+        if not code or not state:
+            raise HTTPException(status_code=400, detail="invalid callback")
+        redis = await redis_client()
+        raw = await redis.get(f"oauth:pkce:pending:{state}")
+        if not raw:
+            raise HTTPException(status_code=400, detail="unknown or expired state")
+        pending = json.loads(raw)
+
+        token_url = f"{settings.supabase_url.rstrip('/')}/auth/v1/token?grant_type=authorization_code"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                token_url,
+                headers={
+                    "apikey": settings.supabase_anon_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "code": code,
+                },
+            )
+        if resp.status_code >= 400:
+            log.warning("supabase_token_exchange_failed", status=resp.status_code)
+            raise HTTPException(status_code=401, detail="supabase code exchange failed")
+        body = resp.json()
+        access = body.get("access_token")
+        if not access:
+            raise HTTPException(status_code=401, detail="no access token from supabase")
+
+        try:
+            # Supabase JWT — verify signature optionally; decode without verify for sub fallback
+            unverified = jwt.get_unverified_claims(access)
+            user_id = str(unverified.get("sub", ""))
+        except JWTError:
+            user_id = ""
+        if not user_id:
+            raise HTTPException(status_code=401, detail="invalid supabase session")
+
+        director_code = secrets.token_urlsafe(48)
+        code_payload = {
+            "user_id": user_id,
+            "code_challenge": pending["code_challenge"],
+            "redirect_uri": pending["redirect_uri"],
+            "client_id": pending["client_id"],
+            "scopes": ["pipeline:read", "pipeline:write", "assets:read"],
+        }
+        await redis.setex(
+            f"oauth:code:{director_code}",
+            CODE_TTL,
+            json.dumps(code_payload),
+        )
+        await redis.delete(f"oauth:pkce:pending:{state}")
+
+        dest = urlparse(pending["redirect_uri"])
+        query = f"code={quote(director_code)}&state={quote(pending['client_state'])}"
+        if dest.query:
+            new_query = f"{dest.query}&{query}"
+        else:
+            new_query = query
+        loc = urlunparse(
+            (dest.scheme, dest.netloc, dest.path, dest.params, new_query, dest.fragment)
+        )
+        return RedirectResponse(loc, status_code=302)
+
+    @router.post("/oauth/token")
+    async def oauth_token(request: Request):
+        settings = get_settings()
+        _ensure_https_production(request, settings)
+        form = await request.form()
+        grant_type = form.get("grant_type")
+        if grant_type != "authorization_code":
+            raise HTTPException(status_code=400, detail="unsupported grant_type")
+        code_verifier = str(form.get("code_verifier") or "")
+        code = str(form.get("code") or "")
+        if not code_verifier or not code:
+            raise HTTPException(status_code=400, detail="missing code or code_verifier")
+
+        redis = await redis_client()
+        raw = await redis.get(f"oauth:code:{code}")
+        if not raw:
+            raise HTTPException(status_code=401, detail="invalid code")
+        payload = json.loads(raw)
+        if not verify_pkce(code_verifier, payload["code_challenge"]):
+            raise HTTPException(status_code=401, detail="invalid code_verifier")
+
+        await redis.delete(f"oauth:code:{code}")
+
+        access_token, expires_in = create_mcp_access_token(
+            settings=settings,
+            user_id=payload["user_id"],
+            scopes=list(payload.get("scopes", [])),
+        )
+        th = _token_hash(access_token)
+        await redis.setex(
+            f"oauth:token:active:{th}",
+            expires_in + 60,
+            payload["user_id"],
+        )
+        scope_str = " ".join(payload.get("scopes", []))
+        return JSONResponse(
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": expires_in,
+                "scope": scope_str,
+            }
+        )
+
+    @router.post("/oauth/register")
+    async def oauth_register(request: Request):
+        settings = get_settings()
+        _ensure_https_production(request, settings)
+        try:
+            body = await request.json()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="invalid json") from e
+
+        redirect_uris = body.get("redirect_uris") or []
+        if not redirect_uris:
+            raise HTTPException(status_code=400, detail="redirect_uris required")
+
+        client_id = str(uuid.uuid4())
+        meta = {
+            "client_id": client_id,
+            "client_name": body.get("client_name", "mcp-client"),
+            "redirect_uris": redirect_uris,
+            "grant_types": body.get("grant_types", ["authorization_code"]),
+            "token_endpoint_auth_method": body.get(
+                "token_endpoint_auth_method", "none"
+            ),
+            "client_id_issued_at": int(time.time()),
+        }
+        redis = await redis_client()
+        await redis.setex(
+            f"oauth:client:{client_id}",
+            CLIENT_TTL,
+            json.dumps(meta),
+        )
+        return JSONResponse(meta)
+
+    return router

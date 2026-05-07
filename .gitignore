@@ -4,3 +4,5 @@ dist/
 *.pyc
 __pycache__/
 venv/
+.venv/
+_pip_inspect/
