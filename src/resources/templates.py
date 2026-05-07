@@ -40,7 +40,9 @@ assets → audio → edit_assembly → qa → render → package → export
         try:
             req = ctx.request_context.request if ctx.request_context else None
             if req is not None:
-                token = getattr(req.state, "bearer_token", "") or ""
+                up = getattr(req.state, "director_bearer_token", None)
+                base = getattr(req.state, "bearer_token", "") or ""
+                token = (str(up) if up else base) or ""
         except Exception:
             token = ""
         if token:

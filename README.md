@@ -25,10 +25,11 @@ Hosted **Model Context Protocol** server for the **director-cut** AI video pipel
 ## Architecture
 
 - **`/`** — FastAPI: OAuth metadata, authorize/token/register, health, webhooks  
-- **`/mcp`** — FastMCP Streamable HTTP (MCP 2025-06-18 transport)  
-- **Director-cut** — All tools call your FastAPI at `DIRECTOR_BASE_URL` with the user’s Bearer token  
+- **`/mcp`** — FastMCP Streamable HTTP (this app’s **public** MCP for Claude / Cursor)  
+- **Director-cut** (Tauri) — Embedded uvicorn on **`http://127.0.0.1:9420`** by default; REST under `/api/*`, plus a **separate** local MCP at **`http://127.0.0.1:9420/mcp`** (desktop only).  
+- **director-mcp** tools call `DIRECTOR_BASE_URL` (same machine: `http://127.0.0.1:9420`, or a **tunnel URL** when this server runs on Fly).
 
-Configure `DIRECTOR_BASE_URL` to point at the machine where director-cut exposes `/api/*` and `/mcp`.
+**Integration details, health paths, release vs tunnel, and auth alignment** (Supabase Bearer on director-cut REST vs director-mcp JWT): see **[docs/director-cut-discovery-and-prod-setup.md](docs/director-cut-discovery-and-prod-setup.md)**.
 
 ## Environment
 
@@ -63,10 +64,35 @@ curl http://localhost:8080/.well-known/oauth-authorization-server
 curl http://localhost:8080/.well-known/oauth-protected-resource
 ```
 
-MCP Inspector:
+MCP Inspector — use **Streamable HTTP** (this server is **not** STDIO):
+
+1. Run: `npx @modelcontextprotocol/inspector`
+2. Open the URL it prints (e.g. `http://localhost:6274/...`).
+3. **Transport:** pick **Streamable HTTP** / **HTTP** (names vary by version). **Not** “stdio” / “command”.
+4. **Server URL:** `http://localhost:8080/mcp/` — include the **trailing slash**. (A request to `/mcp` without it gets a **307** to `/mcp/`; some Streamable HTTP clients then drop the connection during `initialize`.)
+5. **Auth:** director-mcp validates `Authorization: Bearer <JWT>`. There is no separate “JWT key” field in the Inspector — put the **full token** in a custom header:
+   - Name: `Authorization`
+   - Value: `Bearer eyJ...` (include the word `Bearer` and a space before the token)  
+   Or use “Authentication → Bearer Token” if your Inspector build offers it and paste **only** the eyJ… part.
+6. **JWT secret** lives in your **`.env`** as `JWT_SECRET` (used when you **mint** a token; the Inspector never needs the secret, only the minted JWT).
+
+Mint a **dev JWT** (same secret as `.env`):
 
 ```bash
-npx @modelcontextprotocol/inspector http://localhost:8080/mcp
+set -a && source .env && set +a
+PYTHONPATH=. python -c "from src.auth import create_test_token; print(create_test_token())"
+```
+
+**Common mistake:** choosing STDIO and setting Command to `http://localhost:8080/mcp` — Node then tries to **execute** that string as a program (`spawn … ENOENT`). Use HTTP transport instead.
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+Programmatic smoke test (`list_tools` + `director.project.list`):
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/smoke_mcp_tools.py
 ```
 
 Tests and static checks:
@@ -130,3 +156,10 @@ Repo includes `railway.json` with `Dockerfile` build and `/health` check. Set th
 ## Supabase OAuth bridge
 
 `/oauth/authorize` stores PKCE state in Redis, redirects to Supabase `/auth/v1/authorize`, then `/oauth/callback` exchanges the Supabase code, mints a director-mcp JWT, and redirects to the client `redirect_uri` with an authorization `code`. `/oauth/token` completes PKCE and returns the MCP access token. Adjust Supabase token request body if your project uses a different grant/API version.
+
+
+## command to run mcp inspector
+npx @modelcontextprotocol/inspector http://localhost:8080/mcp
+
+## Command to run the bakckend
+- uvicorn src.server:root_app --host 0.0.0.0 --port 8080

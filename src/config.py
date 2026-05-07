@@ -13,7 +13,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    director_base_url: str = Field(default="http://localhost:9420", alias="DIRECTOR_BASE_URL")
+    director_base_url: str = Field(default="http://127.0.0.1:9420", alias="DIRECTOR_BASE_URL")
+    # Optional: Supabase / WM Studio access JWT for director-cut API. Only applied when
+    # `ENVIRONMENT=development` (e.g. smoke tests with create_test_token). OAuth clients
+    # use the Supabase token stored in Redis at token exchange instead.
+    director_bearer_token: str = Field(default="", alias="DIRECTOR_BEARER_TOKEN")
     jwt_secret: str = Field(default="change-me-32-chars-minimum-for-dev-only", alias="JWT_SECRET")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     token_ttl_seconds: int = Field(default=3600, alias="TOKEN_TTL_SECONDS")

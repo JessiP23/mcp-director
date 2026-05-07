@@ -21,14 +21,24 @@ class DirectorClientError(Exception):
         super().__init__(f"{status_code}: {message}")
 
 
+def _normalize_director_bearer_token(raw: str) -> str:
+    """Strip wrapping quotes and accidental 'Bearer ' prefix from pasted .env tokens."""
+    s = raw.strip()
+    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+        s = s[1:-1].strip()
+    if s.lower().startswith("bearer "):
+        s = s[7:].strip()
+    return s
+
+
 class DirectorClient:
     def __init__(self, base_url: str, user_token: str) -> None:
         self._base = base_url.rstrip("/")
-        self._token = user_token
+        self._token = _normalize_director_bearer_token(user_token)
         self._client = httpx.AsyncClient(
             base_url=self._base,
             timeout=httpx.Timeout(30.0),
-            headers={"Authorization": f"Bearer {user_token}"},
+            headers={"Authorization": f"Bearer {self._token}"},
         )
 
     async def aclose(self) -> None:
@@ -38,6 +48,22 @@ class DirectorClient:
         if resp.status_code >= 400:
             msg = resp.text[:500] if resp.text else resp.reason_phrase
             raise DirectorClientError(resp.status_code, f"{ctx}: {msg}")
+
+    def _json_response(self, resp: httpx.Response, ctx: str) -> Any:
+        """Parse JSON body; empty 2xx body becomes None. Non-JSON raises DirectorClientError."""
+        self._raise_for_status(resp, ctx)
+        raw = (resp.text or "").strip()
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            ctype = resp.headers.get("content-type", "")
+            preview = raw[:160] + ("…" if len(raw) > 160 else "")
+            raise DirectorClientError(
+                resp.status_code,
+                f"{ctx}: expected JSON but got {ctype!r}: {preview!r}",
+            ) from e
 
     @retry(
         reraise=True,
@@ -62,43 +88,57 @@ class DirectorClient:
     async def create_run(self, project_id: str, prompt: str, settings: dict) -> dict:
         payload = {"project_id": project_id, "prompt": prompt, "settings": settings}
         resp = await self._request("POST", "/api/runs", json=payload)
-        self._raise_for_status(resp, "create_run")
-        return resp.json()
+        data = self._json_response(resp, "create_run")
+        assert isinstance(data, dict)
+        return data
 
     async def cancel_run(self, run_id: str) -> dict:
         resp = await self._request("POST", f"/api/runs/{run_id}/cancel")
         if resp.status_code == 404:
             resp = await self._request("DELETE", f"/api/runs/{run_id}")
-        self._raise_for_status(resp, "cancel_run")
-        return resp.json() if resp.content else {"ok": True, "run_id": run_id}
+        if not resp.content:
+            self._raise_for_status(resp, "cancel_run")
+            return {"ok": True, "run_id": run_id}
+        data = self._json_response(resp, "cancel_run")
+        return data if isinstance(data, dict) else {"ok": True, "run_id": run_id}
 
     async def get_run(self, run_id: str) -> dict:
         resp = await self._request("GET", f"/api/runs/{run_id}")
-        self._raise_for_status(resp, "get_run")
-        return resp.json()
+        data = self._json_response(resp, "get_run")
+        if data is None:
+            raise DirectorClientError(resp.status_code, "get_run: empty response body")
+        assert isinstance(data, dict)
+        return data
 
     async def list_runs(self, project_id: str | None = None, limit: int = 20) -> list:
         params: dict[str, Any] = {"limit": limit}
         if project_id:
             params["project_id"] = project_id
         resp = await self._request("GET", "/api/runs", params=params)
-        self._raise_for_status(resp, "list_runs")
-        data = resp.json()
+        data = self._json_response(resp, "list_runs")
+        if data is None:
+            return []
         if isinstance(data, list):
             return data
+        assert isinstance(data, dict)
         return data.get("runs", data.get("items", []))
 
     async def get_run_outputs(self, run_id: str) -> dict:
         resp = await self._request("GET", f"/api/runs/{run_id}/outputs")
-        self._raise_for_status(resp, "get_run_outputs")
-        return resp.json()
+        data = self._json_response(resp, "get_run_outputs")
+        if data is None:
+            return {}
+        assert isinstance(data, dict)
+        return data
 
     async def list_projects(self) -> list:
         resp = await self._request("GET", "/api/projects")
-        self._raise_for_status(resp, "list_projects")
-        data = resp.json()
+        data = self._json_response(resp, "list_projects")
+        if data is None:
+            return []
         if isinstance(data, list):
             return data
+        assert isinstance(data, dict)
         return data.get("projects", data.get("items", []))
 
     async def create_project(self, name: str, description: str = "") -> dict:
@@ -107,8 +147,9 @@ class DirectorClient:
             "/api/projects",
             json={"name": name, "description": description},
         )
-        self._raise_for_status(resp, "create_project")
-        return resp.json()
+        data = self._json_response(resp, "create_project")
+        assert isinstance(data, dict)
+        return data
 
     async def stream_events(self, run_id: str) -> AsyncIterator[dict]:
         token_q = quote(self._token, safe="")
@@ -146,8 +187,10 @@ class DirectorClient:
             "params": params or {},
         }
         resp = await self._request("POST", "/mcp", json=body)
-        self._raise_for_status(resp, "post_mcp_jsonrpc")
-        payload = resp.json()
+        payload = self._json_response(resp, "post_mcp_jsonrpc")
+        if payload is None:
+            raise DirectorClientError(resp.status_code, "post_mcp_jsonrpc: empty body")
+        assert isinstance(payload, dict)
         if "error" in payload:
             err = payload["error"]
             raise DirectorClientError(int(err.get("code", -1)), str(err.get("message", err)))
@@ -157,5 +200,5 @@ class DirectorClient:
         resp = await self._request("GET", "/api/settings")
         if resp.status_code == 404:
             return {}
-        self._raise_for_status(resp, "get_settings")
-        return resp.json()
+        data = self._json_response(resp, "get_settings")
+        return data if isinstance(data, dict) else {}

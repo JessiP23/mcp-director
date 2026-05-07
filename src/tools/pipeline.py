@@ -19,11 +19,13 @@ def _user_client(ctx: Context) -> tuple[str, DirectorClient]:
     rc = ctx.request_context
     if rc is None or rc.request is None:
         raise RuntimeError("missing request context")
-    token = getattr(rc.request.state, "bearer_token", None)
+    mcp_token = getattr(rc.request.state, "bearer_token", None)
+    director_token = getattr(rc.request.state, "director_bearer_token", None)
     user_id = getattr(rc.request.state, "user_id", None)
-    if not token or not user_id:
+    if not mcp_token or not user_id:
         raise RuntimeError("not authenticated")
-    return str(user_id), DirectorClient(get_settings().director_base_url, str(token))
+    bearer = str(director_token) if director_token else str(mcp_token)
+    return str(user_id), DirectorClient(get_settings().director_base_url, bearer)
 
 
 def register(mcp: FastMCP) -> None:

@@ -15,7 +15,13 @@ from jose import jwt
 
 from fastapi import FastAPI
 
-from src.auth import build_oauth_router, create_test_token, validate_mcp_token, verify_pkce
+from src.auth import (
+    build_oauth_router,
+    create_test_token,
+    mcp_upstream_token_key,
+    validate_mcp_token,
+    verify_pkce,
+)
 from src.config import get_settings
 
 
@@ -148,6 +154,46 @@ async def test_token_valid_returns_jwt():
     assert "access_token" in body
     claims = await validate_mcp_token(body["access_token"], redis=fake)
     assert claims["user_id"] == "u1"
+    await fake.aclose()
+
+
+@pytest.mark.asyncio
+async def test_token_valid_stores_supabase_upstream_in_redis():
+    fake = aioredis.FakeRedis(decode_responses=True)
+    verifier = secrets.token_urlsafe(32)
+    challenge = _s256_challenge(verifier)
+    code = "dir-code-upstream"
+    await fake.setex(
+        f"oauth:code:{code}",
+        600,
+        json.dumps(
+            {
+                "user_id": "u1",
+                "code_challenge": challenge,
+                "redirect_uri": "http://localhost/cb",
+                "client_id": "c1",
+                "scopes": ["pipeline:read"],
+                "supabase_access": "supa-jwt-xyz",
+            }
+        ),
+    )
+    app = FastAPI()
+    app.include_router(build_oauth_router(redis_factory=lambda: fake))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as ac:
+        r = await ac.post(
+            "/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": verifier,
+            },
+        )
+    assert r.status_code == 200
+    body = r.json()
+    at = body["access_token"]
+    key = mcp_upstream_token_key(at)
+    stored = await fake.get(key)
+    assert stored == "supa-jwt-xyz"
     await fake.aclose()
 
 

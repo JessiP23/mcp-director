@@ -13,7 +13,8 @@ from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import ToolResult
 
-from src.auth import validate_mcp_token
+from src.auth import mcp_upstream_token_key, validate_mcp_token
+from src.client import _normalize_director_bearer_token
 from src.config import get_settings
 from src.rate_limiter import RateLimiter
 
@@ -65,6 +66,20 @@ class AuthGuardMiddleware(Middleware):
         request.state.user_id = claims["user_id"]
         request.state.scopes = claims["scopes"]
         request.state.bearer_token = token
+
+        upstream: str | None = None
+        if redis:
+            raw = await redis.get(mcp_upstream_token_key(token))
+            if raw:
+                upstream = _normalize_director_bearer_token(str(raw))
+        settings = get_settings()
+        if (
+            not upstream
+            and settings.environment == "development"
+            and settings.director_bearer_token.strip()
+        ):
+            upstream = _normalize_director_bearer_token(settings.director_bearer_token)
+        request.state.director_bearer_token = upstream
 
         return await call_next(context)
 

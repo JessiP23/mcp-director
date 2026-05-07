@@ -39,6 +39,11 @@ def verify_pkce(code_verifier: str, code_challenge: str) -> bool:
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
+
+def mcp_upstream_token_key(mcp_access_token: str) -> str:
+    """Redis key for the director-cut (Supabase) bearer paired with an MCP access token."""
+    return f"mcp:upstream:{_token_hash(mcp_access_token)}"
+
 def create_mcp_access_token(
     *,
     settings: Settings,
@@ -257,6 +262,7 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             "redirect_uri": pending["redirect_uri"],
             "client_id": pending["client_id"],
             "scopes": ["pipeline:read", "pipeline:write", "assets:read"],
+            "supabase_access": access,
         }
         await redis.setex(
             f"oauth:code:{director_code}",
@@ -310,6 +316,13 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             expires_in + 60,
             payload["user_id"],
         )
+        upstream = payload.get("supabase_access")
+        if upstream:
+            await redis.setex(
+                mcp_upstream_token_key(access_token),
+                expires_in + 120,
+                upstream,
+            )
         scope_str = " ".join(payload.get("scopes", []))
         return JSONResponse(
             {
