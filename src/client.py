@@ -39,6 +39,7 @@ class DirectorClient:
             base_url=self._base,
             timeout=httpx.Timeout(30.0),
             headers={"Authorization": f"Bearer {self._token}"},
+            follow_redirects=True,
         )
 
     async def aclose(self) -> None:
@@ -87,7 +88,7 @@ class DirectorClient:
 
     async def create_run(self, project_id: str, prompt: str, settings: dict) -> dict:
         payload = {"project_id": project_id, "prompt": prompt, "settings": settings}
-        resp = await self._request("POST", "/api/runs", json=payload)
+        resp = await self._request("POST", "/api/runs/", json=payload)
         data = self._json_response(resp, "create_run")
         assert isinstance(data, dict)
         return data
@@ -114,7 +115,7 @@ class DirectorClient:
         params: dict[str, Any] = {"limit": limit}
         if project_id:
             params["project_id"] = project_id
-        resp = await self._request("GET", "/api/runs", params=params)
+        resp = await self._request("GET", "/api/runs/", params=params)
         data = self._json_response(resp, "list_runs")
         if data is None:
             return []
@@ -132,7 +133,7 @@ class DirectorClient:
         return data
 
     async def list_projects(self) -> list:
-        resp = await self._request("GET", "/api/projects")
+        resp = await self._request("GET", "/api/projects/")
         data = self._json_response(resp, "list_projects")
         if data is None:
             return []
@@ -144,7 +145,7 @@ class DirectorClient:
     async def create_project(self, name: str, description: str = "") -> dict:
         resp = await self._request(
             "POST",
-            "/api/projects",
+            "/api/projects/",
             json={"name": name, "description": description},
         )
         data = self._json_response(resp, "create_project")
@@ -197,7 +198,7 @@ class DirectorClient:
         return payload.get("result", payload)
 
     async def get_settings_public(self) -> dict:
-        resp = await self._request("GET", "/api/settings")
+        resp = await self._request("GET", "/api/settings/")
         if resp.status_code == 404:
             return {}
         data = self._json_response(resp, "get_settings")

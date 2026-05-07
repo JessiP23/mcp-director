@@ -24,7 +24,7 @@ def mock_director(respx_mock, director_base_url):
     respx_mock.get(f"{director_base_url}/health").mock(
         return_value=httpx.Response(200, json={"status": "ok"})
     )
-    respx_mock.post(f"{director_base_url}/api/runs").mock(
+    respx_mock.post(f"{director_base_url}/api/runs/").mock(
         return_value=httpx.Response(201, json={"id": "run-1", "status": "queued"})
     )
     respx_mock.post(f"{director_base_url}/api/runs/run-1/cancel").mock(
@@ -45,7 +45,7 @@ def mock_director(respx_mock, director_base_url):
     respx_mock.delete(f"{director_base_url}/api/runs/run-1").mock(
         return_value=httpx.Response(200, json={"ok": True})
     )
-    respx_mock.get(f"{director_base_url}/api/runs").mock(
+    respx_mock.get(f"{director_base_url}/api/runs/").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -54,10 +54,10 @@ def mock_director(respx_mock, director_base_url):
             ],
         )
     )
-    respx_mock.get(f"{director_base_url}/api/projects").mock(
+    respx_mock.get(f"{director_base_url}/api/projects/").mock(
         return_value=httpx.Response(200, json=[{"id": "p1", "name": "Demo"}])
     )
-    respx_mock.post(f"{director_base_url}/api/projects").mock(
+    respx_mock.post(f"{director_base_url}/api/projects/").mock(
         return_value=httpx.Response(201, json={"id": "p-new", "name": "new"})
     )
     respx_mock.post(f"{director_base_url}/mcp").mock(

@@ -5,9 +5,11 @@ Hosted **Model Context Protocol** server for the **director-cut** AI video pipel
 ## Quick start (Claude.ai)
 
 1. Open Claude.ai → Settings → Connectors  
-2. Add custom connector: `https://your-domain.example/mcp` (your public `MCP_BASE_URL` + `/mcp`)  
+2. Add custom connector: `https://<your-fly-app>.fly.dev/mcp/` — use your **`MCP_BASE_URL`** + **`/mcp/`** (trailing slash avoids redirect issues on some clients).  
 3. Complete OAuth in the browser (via Supabase IdP)  
 4. Example: “Create a 60-second product launch video for …”
+
+**Tauri + Fly:** Claude talks to **Fly**, not to `127.0.0.1:9420`. Your desktop app must still run (with a **tunnel** to 9420) if **`DIRECTOR_BASE_URL`** on Fly points at that tunnel. See **[docs/director-cut-discovery-and-prod-setup.md](docs/director-cut-discovery-and-prod-setup.md)** — sections *Phased deploy* and *agent prompt — Tauri + hosted director-mcp*.
 
 ## Quick start (Claude Code)
 
@@ -15,7 +17,7 @@ Hosted **Model Context Protocol** server for the **director-cut** AI video pipel
 {
   "mcpServers": {
     "director": {
-      "url": "https://your-domain.example/mcp",
+      "url": "https://<your-fly-app>.fly.dev/mcp/",
       "auth": "oauth"
     }
   }
@@ -28,6 +30,8 @@ Hosted **Model Context Protocol** server for the **director-cut** AI video pipel
 - **`/mcp`** — FastMCP Streamable HTTP (this app’s **public** MCP for Claude / Cursor)  
 - **Director-cut** (Tauri) — Embedded uvicorn on **`http://127.0.0.1:9420`** by default; REST under `/api/*`, plus a **separate** local MCP at **`http://127.0.0.1:9420/mcp`** (desktop only).  
 - **director-mcp** tools call `DIRECTOR_BASE_URL` (same machine: `http://127.0.0.1:9420`, or a **tunnel URL** when this server runs on Fly).
+
+**Product context (WM Studio, Claude / Hermes / OpenClaw, Tauri):** **[docs/wm-studio-mcp-external-agents.md](docs/wm-studio-mcp-external-agents.md)**.
 
 **Integration details, health paths, release vs tunnel, and auth alignment** (Supabase Bearer on director-cut REST vs director-mcp JWT): see **[docs/director-cut-discovery-and-prod-setup.md](docs/director-cut-discovery-and-prod-setup.md)**.
 

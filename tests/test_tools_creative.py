@@ -40,7 +40,7 @@ async def test_remix_run_end_to_end(respx_mock, director_base_url):
     respx_mock.get(f"{director_base_url}/api/runs/src/outputs").mock(
         return_value=httpx.Response(200, json={"script": "A"})
     )
-    respx_mock.post(f"{director_base_url}/api/runs").mock(
+    respx_mock.post(f"{director_base_url}/api/runs/").mock(
         return_value=httpx.Response(201, json={"id": "run-remix", "status": "queued"}),
     )
     c = DirectorClient(director_base_url, "tok")

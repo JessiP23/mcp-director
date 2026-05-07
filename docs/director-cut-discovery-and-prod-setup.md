@@ -88,9 +88,10 @@ Use the raw JWT only (no leading `Bearer `, no surrounding quotes — those are 
 
 ```bash
 TOKEN='paste-eyJ...'
+# Trailing slash avoids a 307 redirect; or use curl -L to follow redirects.
 curl -sS -o /dev/null -w "%{http_code}\n" \
   -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:9420/api/projects
+  http://127.0.0.1:9420/api/projects/
 ```
 
 You want **200** (or **401**/`detail` that is *not* “invalid token format”—meaning the server read it). **401 WM Studio** from this `curl` means the JWT is wrong or expired before you involve MCP.
@@ -149,6 +150,72 @@ DIRECTOR_BASE_URL=...
 
 ---
 
+## Copy-paste: agent prompt — Tauri + hosted director-mcp (orchestration)
+
+Use this **in the director-cut (Tauri) repo** when you need an agent to **align the desktop app** with **director-mcp on Fly** and **Cloudflare Tunnel**. It complements the discovery prompt above (ports, routes).
+
+```text
+You are working in the director-cut repository (Tauri + embedded FastAPI on loopback).
+
+## Architecture snapshot (do not conflate these three URLs)
+
+1) **Tauri / embedded API** — Binds e.g. `http://127.0.0.1:9420`. The desktop UI and local integrations use `/api/*` and optionally local MCP at `http://127.0.0.1:9420/mcp` (Streamable HTTP). This only exists while the app is running.
+
+2) **director-mcp (hosted)** — Example: `https://mcp-director.fly.dev`. External AI apps (Claude, Cursor, Claude Code) connect to **Streamable HTTP** at `https://mcp-director.fly.dev/mcp/` (trailing slash). Auth: **OAuth 2.1 + PKCE** via this service’s `/oauth/*` and Supabase as IdP. This is NOT stdio.
+
+3) **Cloudflare Tunnel** — Public HTTPS URL forwarding to `http://127.0.0.1:9420` on the developer’s machine. director-mcp on Fly sets **DIRECTOR_BASE_URL** to this tunnel origin so **tools** (REST to `/api/...`) reach the same backend as the Tauri app. If the tunnel or Tauri app stops, hosted MCP tool calls fail.
+
+## What “Tauri works with hosted MCP” actually means
+
+- **Claude / Cursor** do **not** talk to `127.0.0.1:9420` directly. They talk to **director-mcp** on Fly.
+- **Tauri** must still run (with backend on **9420**) **when** users rely on a **tunnel to laptop**, because Fly invokes tools against **DIRECTOR_BASE_URL** (the tunnel → localhost:9420).
+- **No code change is strictly required** inside Tauri for Claude to use the product, unless you want:
+  - In-app UI to show “Connect Claude” with the public MCP URL,
+  - Or a user setting for “remote MCP base URL” for debugging,
+  - Or documentation links / deep links.
+
+If the product later offers a **always-on hosted director API**, replace the tunnel with that URL in director-mcp’s **DIRECTOR_BASE_URL**; Tauri may still be local-only for editing.
+
+## director-mcp (Fly) env the other repo must respect
+
+- **MCP_BASE_URL** = `https://<fly-app>.fly.dev` (HTTPS origin only, no `/mcp`).
+- **DIRECTOR_BASE_URL** = tunnel origin `https://<something>.trycloudflare.com` or stable tunnel hostname → must return `GET /health` from the internet when Tauri is up.
+- **REDIS_URL** = Upstash `rediss://...`
+- **SUPABASE_*** = same project as director-cut; Supabase must allow redirect **`https://<fly-app>.fly.dev/oauth/callback`** (and any IdP settings Supabase documents).
+- Production: **ENVIRONMENT=production**, **ENFORCE_HTTPS=true**; do not rely on **DIRECTOR_BEARER_TOKEN** (dev-only).
+
+## director-cut checklist for compatibility
+
+1) Confirm **default backend port** and binding (`127.0.0.1` vs `localhost`) match tunnel and director-mcp docs.
+2) Confirm **REST** list routes use trailing slashes if FastAPI issues 307 (`/api/projects/` vs `/api/projects`) — clients should follow redirects or use canonical paths.
+3) **Auth:** `/api/*` expects **Supabase session JWT** in `Authorization: Bearer`. director-mcp forwards the Supabase **access_token** stored in Redis after OAuth **or** dev **DIRECTOR_BEARER_TOKEN** — already implemented on director-mcp side; ensure director-cut does not reject valid Supabase JWTs from server-side calls.
+4) Document for users: **Laptop + tunnel** = PC must stay on with app open for cloud tools to reach the API.
+
+## Deliverables from this agent
+
+1) Short **README section** or **MCP_INTEGRATION.md** update: “Using Claude / Cursor with hosted director-mcp” + public URL + note about tunnel + Tauri running.
+2) Optional: env example or settings key for **PUBLIC_DIRECTOR_MCP_URL** (https://mcp-director.fly.dev) for in-app copy-paste only — no requirement to proxy MCP through Tauri.
+3) List any **CORS / CSRF** concerns if the WebView ever calls director-mcp directly (usually unnecessary; prefer server-side or documented connector flow).
+
+Output file paths changed and the exact user-facing URLs to document.
+```
+
+### Testing “MCP context” and Claude (Higgsfield-style)
+
+**Hosted MCP** products expose an **HTTPS MCP URL** and **OAuth**, not a local port. Claude and similar apps connect **over the internet** to your server — same *class* of integration as other remote MCP hosts, as long as you configure **Streamable HTTP** (or whatever the product labels it) and **OAuth** per their UI.
+
+| Goal | What to do |
+|------|------------|
+| **Verify director-mcp on Fly** | `curl -sS https://mcp-director.fly.dev/health` and `/.well-known/oauth-authorization-server` |
+| **Verify MCP session + tools (no Claude yet)** | MCP Inspector: transport **HTTP / Streamable HTTP**, URL **`https://mcp-director.fly.dev/mcp/`**, auth via **Bearer** (minted JWT in dev) or step through **OAuth** if the Inspector supports it |
+| **Smoke script** | `MCP_URL=https://mcp-director.fly.dev/mcp/` + env for OAuth token or dev JWT; `MCP_SMOKE_LIST_ONLY=1` first, then full tool call when **DIRECTOR_BASE_URL** tunnel is up |
+| **Claude.ai** | Settings → Connectors → custom connector → MCP URL **`https://mcp-director.fly.dev/mcp`** (add trailing slash if their UI strips it wrong — prefer **`.../mcp/`** per README) → complete **OAuth** in browser (Supabase) |
+| **Claude Code / Cursor** | Config: **`url`**: `https://mcp-director.fly.dev/mcp` or **`.../mcp/`**, **`auth`**: **`oauth`** where supported |
+
+**Important:** Ports **8080** / **9420** are **local-only**. Claude never connects to `127.0.0.1`; it connects to **`https://mcp-director.fly.dev`**. **9420** is only for **Tauri + tunnel origin**.
+
+---
+
 ## How this fits your case (Tauri, nothing “deploys” the API)
 
 | Scenario | What `DIRECTOR_BASE_URL` is |
@@ -158,6 +225,23 @@ DIRECTOR_BASE_URL=...
 | You add a **hosted director API** later | `DIRECTOR_BASE_URL=https://api.yourproduct.com` from that deploy. |
 
 **GitHub-hosted releases** are usually **installer/binaries**, not a URL for an HTTP API. So “prod URL for the Tauri app” for MCP purposes is either **tunnel → your machine while app runs**, or a **separate API service** you intentionally deploy.
+
+### How auth works in production (vs your local smoke test)
+
+| Piece | Local dev (what you just ran) | Production (`ENVIRONMENT=production`) |
+|--------|--------------------------------|----------------------------------------|
+| **MCP** (`/mcp/`) | Browser/Inspector/smoke sends **`Authorization: Bearer <director-mcp JWT>`** (minted via `create_test_token` or from **`/oauth/token`**) | Same: clients use OAuth; user ends up with an **MCP access token** after PKCE. |
+| **director-cut** (`DIRECTOR_BASE_URL` /api) | **`DIRECTOR_BEARER_TOKEN`** in `.env` supplies the **Supabase** JWT so tools work without going through OAuth on every smoke run. | **`DIRECTOR_BEARER_TOKEN` is not used** (only read when `ENVIRONMENT=development`). After OAuth, the Supabase **`access_token`** from the callback is stored in **Redis** next to the MCP token; **`AuthGuard`** loads it for each request. Users never paste Supabase tokens into Fly secrets. |
+| **Expiry** | You refresh **DIRECTOR_BEARER_TOKEN** manually when Supabase expires. | MCP JWT and cached Supabase token have TTLs; user **re-auths via OAuth** when the client refreshes. |
+
+So: **manual Supabase token is a dev convenience, not the product design.** Deployed behavior is **OAuth → Redis pairing → tools forward Supabase to director-cut**.
+
+### What to test before and after deploy (each part)
+
+1. **This service only** — `GET /health`, `/.well-known/oauth-*`, then **`MCP_SMOKE_LIST_ONLY=1`** (no director-cut).
+2. **Director-cut reachability from the host** — `curl` **`DIRECTOR_BASE_URL/health`** (from the same network as the MCP process: Fly cannot call **`127.0.0.1`** on your laptop unless you use a **tunnel**).
+3. **Full path** — One **OAuth** sign-in, then an MCP tool that hits `/api/` (same as your successful **`director.project.list`**), or a staging secret user + automated E2E later.
+4. **Never put a user’s Supabase JWT in Fly secrets** — only `JWT_SECRET`, Supabase **anon** key, `REDIS_URL`, URLs, etc.
 
 ---
 
@@ -198,37 +282,119 @@ Do these **locally** in order; they catch most Fly failures in seconds.
 
 ---
 
-## Deploy director-mcp “for free” and use Cloudflare Tunnel
+## Phased deploy: Fly first, then Cloudflare, then wire URLs
 
-### A. Hosted MCP (Fly) + API on your laptop (common while bootstrapping)
+You already have **Upstash** (`rediss://` URL) and **Supabase** (project URL + anon key). Install two CLIs on your machine: **[Fly](https://fly.io/docs/hands-on/install-flyctl/)** (`fly`) and **[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/)**. Work each **group** to completion before moving on.
 
-1. **Deploy MCP** to Fly (Dockerfile already in repo). Set secrets:
+### Group 1 — Fly (finish this before Cloudflare)
 
-   - `REDIS_URL` (Upstash `rediss://...`)
-   - `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`
-   - `MCP_BASE_URL=https://<your-app>.fly.dev`
-   - `DIRECTOR_BASE_URL` = **tunnel URL** (step 2)
+1. **Log in**
 
-2. **Tunnel director-cut’s API** (laptop, Tauri running):
+   ```bash
+   fly auth login
+   ```
 
-   - Install [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/).
-   - Quick test: `cloudflared tunnel --url http://127.0.0.1:9420`  
-     → note the `https://….trycloudflare.com` URL (temporary).
-   - Stable: Cloudflare Zero Trust → Tunnels → configure hostname `director-api.yourdomain.com` → service `http://127.0.0.1:9420`.
+2. **App name** — In `fly.toml`, `app = "director-mcp"` must be unique on Fly. Change it if `fly launch` complains.
 
-3. Set **`DIRECTOR_BASE_URL`** on Fly to `https://director-api.yourdomain.com` (or trycloudflare URL for a short test).
+3. **First deploy** (from repo root):
 
-4. **Supabase**: add redirect URL `https://<your-app>.fly.dev/oauth/callback` (and any dev URLs you use).
+   ```bash
+   fly launch
+   ```
 
-**Limitation:** Your PC must be on and Tauri running for the tunnel to work—that is not “serverless prod,” but it is real end-to-end prod *behavior* for demos.
+   - Choose region, attach to this `Dockerfile`, decline extra Postgres unless you want it (you use Upstash for Redis).
+   - After a successful deploy, note your URL: **`https://<app-name>.fly.dev`**.
 
-### B. Everything on laptop + tunnel only MCP
+4. **Smoke the app** (no secrets yet beyond what launch set):
 
-If you don’t want Fly yet:
+   ```bash
+   curl -sS "https://<app-name>.fly.dev/health"
+   ```
 
-- Run MCP on `8080`, tunnel `cloudflared tunnel --url http://127.0.0.1:8080`.
-- Set `MCP_BASE_URL` to the tunnel URL in `.env` / Supabase redirects.
-- Keep `DIRECTOR_BASE_URL=http://127.0.0.1:9420` on the **same machine** (no Fly).
+   You want JSON `{"status":"ok",...}`. If this fails, fix Fly/DNS/build before anything else.
+
+5. **Stop here for Group 1** — You now have a stable **`MCP_BASE_URL`** candidate:  
+   **`https://<app-name>.fly.dev`** (no `/mcp` on the end for this variable).
+
+### Group 2 — Cloudflare Tunnel (expose director-cut)
+
+Fly cannot call `127.0.0.1:9420` on your laptop. After Fly works, expose the **director-cut API** with a **public HTTPS URL**.
+
+1. **Run director-cut** locally so **`http://127.0.0.1:9420/health`** works.
+
+2. **Quick tunnel** (ephemeral URL, good for first E2E test):
+
+   ```bash
+   cloudflared tunnel --url http://127.0.0.1:9420
+   ```
+
+   Copy **`https://….trycloudflare.com`** (new each run).
+
+3. **Optional stable URL** — Cloudflare Zero Trust → **Networks → Tunnels** → create tunnel → public hostname (e.g. `director-api.yourdomain.com`) → service **`http://127.0.0.1:9420`**.
+
+4. **Test from your phone or another network** (not only localhost):
+
+   ```bash
+   curl -sS "https://<tunnel-host>/health"
+   ```
+
+   If this fails, Fly will not be able to reach director-cut either.
+
+5. **Stop here for Group 2** — Your **`DIRECTOR_BASE_URL`** is that origin only, e.g.  
+   **`https://abc123.trycloudflare.com`** or **`https://director-api.yourdomain.com`** (no path).
+
+**Limitation:** Laptop must be on and director-cut running while you use a tunnel to it.
+
+### Group 3 — Supabase (URLs only; you already have the project)
+
+1. In Supabase **Authentication → URL configuration**, allow your app’s origins/redirects as required by your setup.
+
+2. Ensure OAuth can return to director-mcp:
+
+   **`https://<app-name>.fly.dev/oauth/callback`**
+
+   (Built from **`MCP_BASE_URL`** in your server.)
+
+3. If Google/GitHub console requires redirect URIs for Supabase, follow Supabase’s docs for those (often Supabase hosts the IdP callback).
+
+### Group 4 — Fly secrets + production flags
+
+Set everything in **one** place on Fly (replace values):
+
+```bash
+fly secrets set \
+  ENVIRONMENT=production \
+  ENFORCE_HTTPS=true \
+  REDIS_URL='rediss://...' \
+  JWT_SECRET='<long-random-secret>' \
+  MCP_BASE_URL='https://<app-name>.fly.dev' \
+  DIRECTOR_BASE_URL='https://<tunnel-host-from-group-2>' \
+  SUPABASE_URL='https://<ref>.supabase.co' \
+  SUPABASE_ANON_KEY='eyJ...' \
+  SUPABASE_OAUTH_PROVIDER=google
+```
+
+- Do **not** set **`DIRECTOR_BEARER_TOKEN`** in production (dev-only).
+- Redeploy so machines pick up secrets:
+
+  ```bash
+  fly deploy
+  ```
+
+### Group 5 — Verify end-to-end
+
+| Step | Command / action |
+|------|-------------------|
+| MCP health | `curl -sS https://<app>.fly.dev/health` |
+| OAuth metadata | `curl -sS https://<app>.fly.dev/.well-known/oauth-authorization-server \| head` |
+| Director via tunnel | `curl -sS https://<tunnel-host>/api/projects/` with a valid Bearer (or sign in via app) |
+| MCP client | Streamable HTTP → **`https://<app>.fly.dev/mcp/`** + OAuth or issued token; call a tool |
+
+---
+
+### Alternative: MCP on laptop only (no Fly)
+
+- Run MCP on port 8080 locally, tunnel **`cloudflared tunnel --url http://127.0.0.1:8080`**, set **`MCP_BASE_URL`** to that HTTPS URL, keep **`DIRECTOR_BASE_URL=http://127.0.0.1:9420`** on the **same** machine.
 
 ---
 
