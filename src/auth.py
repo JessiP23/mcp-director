@@ -206,6 +206,13 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
         )
 
         callback = f"{settings.mcp_base_url.rstrip('/')}/oauth/callback"
+        log.info(
+            "oauth_authorize_start",
+            bridge_sha256_prefix=_token_hash(bridge)[:16],
+            oauth_callback_url=callback,
+            mcp_client_redirect_host=urlparse(redirect_uri).netloc or "",
+            supabase_host=urlparse(settings.supabase_url).netloc,
+        )
         supabase_authorize = (
             f"{settings.supabase_url.rstrip('/')}/auth/v1/authorize"
             f"?provider={quote(settings.supabase_oauth_provider)}"
@@ -219,12 +226,27 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
         settings = get_settings()
         _ensure_https_production(request, settings)
         if not code or not state:
+            log.warning(
+                "oauth_callback_missing_params",
+                has_code=bool(code),
+                has_state=bool(state),
+            )
             raise HTTPException(status_code=400, detail="invalid callback")
         redis = await redis_client()
         raw = await redis.get(f"oauth:pkce:pending:{state}")
+        state_h = _token_hash(str(state))[:16]
         if not raw:
+            log.warning(
+                "oauth_callback_pending_miss",
+                state_sha256_prefix=state_h,
+                hint="Bridge expired, wrong Redis, duplicate tab, or MCP_BASE_URL changed mid-flow — check Supabase redirect allowlist if user lands on Site URL with bad_oauth_state.",
+            )
             raise HTTPException(status_code=400, detail="unknown or expired state")
         pending = json.loads(raw)
+        log.info(
+            "oauth_callback_pending_hit",
+            state_sha256_prefix=state_h,
+        )
 
         token_url = f"{settings.supabase_url.rstrip('/')}/auth/v1/token?grant_type=authorization_code"
         async with httpx.AsyncClient(timeout=30) as client:
@@ -239,7 +261,12 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
                 },
             )
         if resp.status_code >= 400:
-            log.warning("supabase_token_exchange_failed", status=resp.status_code)
+            err_snip = (resp.text or "")[:200]
+            log.warning(
+                "supabase_token_exchange_failed",
+                status=resp.status_code,
+                body_snippet=err_snip,
+            )
             raise HTTPException(status_code=401, detail="supabase code exchange failed")
         body = resp.json()
         access = body.get("access_token")
@@ -279,6 +306,10 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             new_query = query
         loc = urlunparse(
             (dest.scheme, dest.netloc, dest.path, dest.params, new_query, dest.fragment)
+        )
+        log.info(
+            "oauth_callback_success_redirect",
+            mcp_client_redirect_host=dest.netloc or "",
         )
         return RedirectResponse(loc, status_code=302)
 

@@ -85,6 +85,10 @@ root_app.include_router(build_oauth_router(), prefix="")
 @root_app.middleware("http")
 async def _https_guard(request: Request, call_next):
     settings = get_settings()
+    # Fly health checks hit :8080 over HTTP without X-Forwarded-Proto; rejecting
+    # them breaks service checks and edge routing (PM05 intermittent failures).
+    if request.url.path == "/health":
+        return await call_next(request)
     if settings.environment == "production" or settings.enforce_https:
         proto = request.headers.get("x-forwarded-proto", request.url.scheme)
         if proto != "https":

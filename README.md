@@ -35,6 +35,8 @@ Hosted **Model Context Protocol** server for the **director-cut** AI video pipel
 
 **Integration details, health paths, release vs tunnel, and auth alignment** (Supabase Bearer on director-cut REST vs director-mcp JWT): see **[docs/director-cut-discovery-and-prod-setup.md](docs/director-cut-discovery-and-prod-setup.md)**.
 
+**OAuth on Fly + Supabase (`bad_oauth_state`, redirect allowlist, `MCP_BASE_URL`):** **[docs/oauth-fly-supabase-runbook.md](docs/oauth-fly-supabase-runbook.md)**.
+
 ## Environment
 
 Copy `.env.example` → `.env` and set at minimum:

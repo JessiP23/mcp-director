@@ -18,5 +18,5 @@ EXPOSE 8080
 
 CMD ["uvicorn", "src.server:root_app", \
      "--host", "0.0.0.0", "--port", "8080", \
-     "--workers", "4", "--loop", "uvloop", \
+     "--workers", "1", "--loop", "uvloop", \
      "--log-config", "src/log_config.json"]
