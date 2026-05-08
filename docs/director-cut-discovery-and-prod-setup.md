@@ -240,7 +240,7 @@ So: **manual Supabase token is a dev convenience, not the product design.** Depl
 
 1. **This service only** — `GET /health`, `/.well-known/oauth-*`, then **`MCP_SMOKE_LIST_ONLY=1`** (no director-cut).
 2. **Director-cut reachability from the host** — `curl` **`DIRECTOR_BASE_URL/health`** (from the same network as the MCP process: Fly cannot call **`127.0.0.1`** on your laptop unless you use a **tunnel**).
-3. **Full path** — One **OAuth** sign-in, then an MCP tool that hits `/api/` (same as your successful **`director.project.list`**), or a staging secret user + automated E2E later.
+3. **Full path** — One **OAuth** sign-in, then an MCP tool that hits `/api/` (same as your successful **`director_project_list`**), or a staging secret user + automated E2E later.
 4. **Never put a user’s Supabase JWT in Fly secrets** — only `JWT_SECRET`, Supabase **anon** key, `REDIS_URL`, URLs, etc.
 
 ---

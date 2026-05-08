@@ -23,7 +23,7 @@ def test_slug_title():
 async def test_mcp_llm_jsonrpc(mock_director, director_base_url):
     c = DirectorClient(director_base_url, "tok")
     try:
-        r = await c.post_mcp_jsonrpc("tools/call", {"name": "director.service.llm"})
+        r = await c.post_mcp_jsonrpc("tools/call", {"name": "director_service_llm"})
         assert r.get("structuredContent", {}).get("settings", {}).get("scene_count") == 5
     finally:
         await c.aclose()

@@ -84,6 +84,10 @@ root_app.include_router(build_oauth_router(), prefix="")
 
 @root_app.middleware("http")
 async def _https_guard(request: Request, call_next):
+    # Starlette Mount("/mcp") only matches /mcp/{path}; bare /mcp never reaches MCP.
+    # Clients (e.g. Claude UI) often omit the trailing slash — normalize before routing.
+    if request.scope.get("type") == "http" and request.scope.get("path") == "/mcp":
+        request.scope["path"] = "/mcp/"
     settings = get_settings()
     # Fly health checks hit :8080 over HTTP without X-Forwarded-Proto; rejecting
     # them breaks service checks and edge routing (PM05 intermittent failures).

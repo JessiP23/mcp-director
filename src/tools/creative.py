@@ -48,7 +48,7 @@ async def _expand_brief_with_llm(
         result = await client.post_mcp_jsonrpc(
             "tools/call",
             params={
-                "name": "director.service.llm",
+                "name": "director_service_llm",
                 "arguments": {
                     "task": "brief_to_settings",
                     "brief": brief,
@@ -89,7 +89,7 @@ async def _expand_brief_with_llm(
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool(name="director.creative.brief_to_run")
+    @mcp.tool(name="director_creative_brief_to_run")
     async def brief_to_run(
         ctx: Context,
         brief: str,
@@ -136,7 +136,7 @@ def register(mcp: FastMCP) -> None:
             "settings_applied": merged,
         }
 
-    @mcp.tool(name="director.creative.batch_variations")
+    @mcp.tool(name="director_creative_batch_variations")
     async def batch_variations(
         ctx: Context,
         base_prompt: str,
@@ -186,7 +186,7 @@ def register(mcp: FastMCP) -> None:
 
         return {"batch_id": batch_id, "run_ids": run_ids, "variation_matrix": matrix}
 
-    @mcp.tool(name="director.creative.remix")
+    @mcp.tool(name="director_creative_remix")
     async def remix_run(
         ctx: Context,
         source_run_id: str,
@@ -220,7 +220,7 @@ def register(mcp: FastMCP) -> None:
             "stages_to_rerun": stages_to_rerun,
         }
 
-    @mcp.tool(name="director.creative.storyboard_preview")
+    @mcp.tool(name="director_creative_storyboard_preview")
     async def storyboard_preview(ctx: Context, run_id: str) -> dict:
         """Return structured storyboard / scene data when present in run outputs."""
         _, client = _user_client(ctx)
@@ -236,7 +236,7 @@ def register(mcp: FastMCP) -> None:
             scenes = [{"shot_description": "n/a", "dialogue": "", "notes": str(script)[:400]}]
         return {"run_id": run_id, "scenes": scenes}
 
-    @mcp.tool(name="director.creative.script_extract")
+    @mcp.tool(name="director_creative_script_extract")
     async def script_extract(ctx: Context, run_id: str, format: str = "markdown") -> str:
         """Extract the final script from a run in markdown, fountain, plain, or json."""
         _, client = _user_client(ctx)
@@ -253,7 +253,7 @@ def register(mcp: FastMCP) -> None:
             return re.sub(r"[#*_`]", "", str(script))
         return str(script)
 
-    @mcp.tool(name="director.creative.suggest_improvements")
+    @mcp.tool(name="director_creative_suggest_improvements")
     async def suggest_improvements(
         ctx: Context,
         run_id: str,
@@ -266,7 +266,7 @@ def register(mcp: FastMCP) -> None:
             result = await client.post_mcp_jsonrpc(
                 "tools/call",
                 params={
-                    "name": "director.service.llm",
+                    "name": "director_service_llm",
                     "arguments": {
                         "task": "suggest_improvements",
                         "aspect": aspect,

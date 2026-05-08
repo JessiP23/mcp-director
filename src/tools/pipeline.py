@@ -1,4 +1,4 @@
-"""Pipeline and project tools (director.run.*, director.project.*)."""
+"""Pipeline and project tools (director_run_*, director_project_*)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _user_client(ctx: Context) -> tuple[str, DirectorClient]:
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool(name="director.run.create")
+    @mcp.tool(name="director_run_create")
     async def create_run(
         ctx: Context,
         project_id: str,
@@ -81,13 +81,13 @@ def register(mcp: FastMCP) -> None:
         finally:
             await redis.aclose()
 
-    @mcp.tool(name="director.run.status")
+    @mcp.tool(name="director_run_status")
     async def get_run_status(ctx: Context, run_id: str) -> dict:
         """Get the current status, stage, and progress of a pipeline run."""
         _, client = _user_client(ctx)
         return await client.get_run(run_id)
 
-    @mcp.tool(name="director.run.outputs")
+    @mcp.tool(name="director_run_outputs")
     async def get_run_outputs(ctx: Context, run_id: str) -> dict:
         """
         Retrieve all outputs from a completed run including script, storyboard,
@@ -96,13 +96,13 @@ def register(mcp: FastMCP) -> None:
         _, client = _user_client(ctx)
         return await client.get_run_outputs(run_id)
 
-    @mcp.tool(name="director.run.cancel")
+    @mcp.tool(name="director_run_cancel")
     async def cancel_run(ctx: Context, run_id: str) -> dict:
         """Cancel an in-progress pipeline run."""
         _, client = _user_client(ctx)
         return await client.cancel_run(run_id)
 
-    @mcp.tool(name="director.run.list")
+    @mcp.tool(name="director_run_list")
     async def list_runs(
         ctx: Context,
         project_id: str | None = None,
@@ -122,13 +122,13 @@ def register(mcp: FastMCP) -> None:
                 out.append(r)
         return out
 
-    @mcp.tool(name="director.project.create")
+    @mcp.tool(name="director_project_create")
     async def create_project(ctx: Context, name: str, description: str = "") -> dict:
         """Create a new project to organize pipeline runs."""
         _, client = _user_client(ctx)
         return await client.create_project(name, description)
 
-    @mcp.tool(name="director.project.list")
+    @mcp.tool(name="director_project_list")
     async def list_projects(ctx: Context) -> list:
         """List all projects for the authenticated user."""
         _, client = _user_client(ctx)

@@ -37,7 +37,7 @@ Those agents should be able to:
 
 1. **User** connects an MCP client (e.g. Claude connector) to **`https://<mcp-host>/mcp/`**.
 2. **User** completes **OAuth**; director-mcp issues an **MCP access token** and stores the **Supabase `access_token`** in **Redis** keyed to that MCP token.
-3. **Agent** calls MCP tools (`director.project.list`, `director.run.create`, asset tools, etc.).
+3. **Agent** calls MCP tools (`director_project_list`, `director_run_create`, asset tools, etc.).
 4. **director-mcp** validates the MCP JWT, loads the paired Supabase token, and calls **`DIRECTOR_BASE_URL`** (e.g. Cloudflare tunnel → `127.0.0.1:9420` during laptop dev, or a future **always-on** API).
 5. **director-cut** enforces WM Studio session rules (**WM Studio / Supabase JWT** on `/api/*`) and performs pipeline work; results appear in the same projects the user sees in WM Studio.
 
@@ -102,7 +102,7 @@ You do **not** need Tauri to “open a port” for Claude. Claude uses **Fly**. 
 | OAuth metadata | `GET /.well-known/oauth-authorization-server` |
 | MCP transport | `MCP_SMOKE_LIST_ONLY=1` against `https://<app>.fly.dev/mcp/` with valid MCP auth |
 | director-cut from Fly’s perspective | `GET https://<DIRECTOR_BASE_URL>/health` from internet while Tauri+tunnel up |
-| Full tool | OAuth user calls e.g. `director.project.list`; lists match WM Studio projects |
+| Full tool | OAuth user calls e.g. `director_project_list`; lists match WM Studio projects |
 | Claude | Connector completes OAuth; one natural language workflow creates or references a run/project |
 
 ---

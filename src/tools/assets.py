@@ -9,7 +9,7 @@ from src.tools.pipeline import _user_client
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool(name="director.asset.list")
+    @mcp.tool(name="director_asset_list")
     async def list_assets(ctx: Context, run_id: str) -> list:
         """List all generated assets (images, audio, video clips) for a run."""
         _, client = _user_client(ctx)
@@ -22,7 +22,7 @@ def register(mcp: FastMCP) -> None:
         clips = outputs.get("clips", [])
         return clips if isinstance(clips, list) else []
 
-    @mcp.tool(name="director.asset.download_url")
+    @mcp.tool(name="director_asset_download_url")
     async def get_download_url(ctx: Context, run_id: str, asset_name: str) -> dict:
         """Get a signed download URL for a specific asset from a run."""
         _, client = _user_client(ctx)
@@ -38,7 +38,7 @@ def register(mcp: FastMCP) -> None:
                 }
         return {"run_id": run_id, "asset_name": asset_name, "url": None, "error": "not_found"}
 
-    @mcp.tool(name="director.asset.export_package")
+    @mcp.tool(name="director_asset_export_package")
     async def export_package(ctx: Context, run_id: str) -> dict:
         """
         Get the final export package info including master video URL,

@@ -78,7 +78,7 @@ Product: {product_name}
 Description: {product_description}
 Audience: {target_audience}
 
-Use director.creative.brief_to_run with style=cinematic and
+Use director_creative_brief_to_run with style=cinematic and
 platform=youtube. Then poll until complete and return the export URL.
 """.strip(),
             }
@@ -91,7 +91,7 @@ platform=youtube. Then poll until complete and return the export URL.
             {
                 "role": "user",
                 "content": f"""
-Use director.creative.batch_variations to create {episode_count}
+Use director_creative_batch_variations to create {episode_count}
 short-form variations on the topic: "{topic}".
 Vary tone and pacing. Return all run_ids and poll for completion.
 """.strip(),

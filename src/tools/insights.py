@@ -11,7 +11,7 @@ from src.tools.pipeline import _user_client
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool(name="director.insight.run_cost")
+    @mcp.tool(name="director_insight_run_cost")
     async def estimate_cost(
         ctx: Context,
         project_id: str | None = None,
@@ -55,7 +55,7 @@ def register(mcp: FastMCP) -> None:
             "runs_considered": len(runs),
         }
 
-    @mcp.tool(name="director.insight.pipeline_analytics")
+    @mcp.tool(name="director_insight_pipeline_analytics")
     async def pipeline_analytics(ctx: Context, project_id: str) -> dict:
         """
         Return analytics for a project: avg run time per stage, success rate,
@@ -91,7 +91,7 @@ def register(mcp: FastMCP) -> None:
             "total_render_minutes": round(sum(durations) / 60.0, 2),
         }
 
-    @mcp.tool(name="director.insight.model_recommendations")
+    @mcp.tool(name="director_insight_model_recommendations")
     async def model_recommendations(
         ctx: Context,
         use_case: str,

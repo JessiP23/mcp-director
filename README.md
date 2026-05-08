@@ -95,7 +95,7 @@ PYTHONPATH=. python -c "from src.auth import create_test_token; print(create_tes
 npx @modelcontextprotocol/inspector
 ```
 
-Programmatic smoke test (`list_tools` + `director.project.list`):
+Programmatic smoke test (`list_tools` + `director_project_list`):
 
 ```bash
 PYTHONPATH=. .venv/bin/python scripts/smoke_mcp_tools.py
@@ -122,27 +122,29 @@ mypy src/
 
 ## Tools (19)
 
-### Pipeline — `director.run.*`, `director.project.*`
+Tool names use **underscores** (e.g. `director_project_list`), not dots — some MCP clients (including Claude’s UI) only allow `^[a-zA-Z0-9_-]{1,64}$`.
 
-- `director.run.create` — start a run; optional wait/poll with progress  
-- `director.run.status` / `director.run.outputs` / `director.run.cancel` / `director.run.list`  
-- `director.project.create` / `director.project.list`  
+### Pipeline — `director_run_*`, `director_project_*`
 
-### Creative — `director.creative.*`
+- `director_run_create` — start a run; optional wait/poll with progress  
+- `director_run_status` / `director_run_outputs` / `director_run_cancel` / `director_run_list`  
+- `director_project_create` / `director_project_list`  
 
-- `director.creative.brief_to_run` — brief → settings (via director `/mcp` LLM when available) + run  
-- `director.creative.batch_variations` — Cartesian variations, concurrent submits  
-- `director.creative.remix` — remix from prior run outputs  
-- `director.creative.storyboard_preview` / `director.creative.script_extract`  
-- `director.creative.suggest_improvements` — LLM hints via `/mcp` with fallback  
+### Creative — `director_creative_*`
 
-### Assets — `director.asset.*`
+- `director_creative_brief_to_run` — brief → settings (via director `/mcp` LLM when available) + run  
+- `director_creative_batch_variations` — Cartesian variations, concurrent submits  
+- `director_creative_remix` — remix from prior run outputs  
+- `director_creative_storyboard_preview` / `director_creative_script_extract`  
+- `director_creative_suggest_improvements` — LLM hints via `/mcp` with fallback  
 
-- `director.asset.list` / `director.asset.download_url` / `director.asset.export_package`  
+### Assets — `director_asset_*`
 
-### Insights — `director.insight.*`
+- `director_asset_list` / `director_asset_download_url` / `director_asset_export_package`  
 
-- `director.insight.run_cost` / `director.insight.pipeline_analytics` / `director.insight.model_recommendations`  
+### Insights — `director_insight_*`
+
+- `director_insight_run_cost` / `director_insight_pipeline_analytics` / `director_insight_model_recommendations`  
 
 ## Deploy (Fly.io)
 

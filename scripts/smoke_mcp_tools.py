@@ -50,7 +50,7 @@ async def main() -> None:
     if list_only:
         print("Calling list_tools only (MCP_SMOKE_LIST_ONLY=1) …")
     else:
-        print("Calling list_tools then director.project.list …")
+        print("Calling list_tools then director_project_list …")
 
     async with Client(url, auth=token) as client:
         tools = await client.list_tools()
@@ -62,7 +62,7 @@ async def main() -> None:
             return
 
         try:
-            result = await client.call_tool("director.project.list", {})
+            result = await client.call_tool("director_project_list", {})
         except ToolError as e:
             err = str(e)
             if "401" in err and "WM Studio" in err:
@@ -75,7 +75,7 @@ async def main() -> None:
                     "MCP-only check: MCP_SMOKE_LIST_ONLY=1 …\n"
                 )
             raise
-        print("director.project.list result:", result)
+        print("director_project_list result:", result)
 
 
 if __name__ == "__main__":
