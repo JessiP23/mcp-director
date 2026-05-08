@@ -4,6 +4,7 @@ import pytest
 
 os.environ.setdefault("JWT_SECRET", "test-secret-thirty-two-characters!!")
 os.environ.setdefault("SUPABASE_ANON_KEY", "test-anon-key-value")
+os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
 os.environ.setdefault("MCP_BASE_URL", "http://testserver")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 os.environ.setdefault("DIRECTOR_BASE_URL", "http://mock-director:9420")

@@ -101,10 +101,21 @@ Programmatic smoke test (`list_tools` + `director.project.list`):
 PYTHONPATH=. .venv/bin/python scripts/smoke_mcp_tools.py
 ```
 
-Tests and static checks:
+OAuth-focused tests (mock Supabase token exchange):
+
+```bash
+PYTHONPATH=. pytest tests/test_auth.py -v --tb=short
+```
+
+Full suite:
 
 ```bash
 PYTHONPATH=. pytest tests/ -v --tb=short
+```
+
+Static checks:
+
+```bash
 ruff check src/ tests/
 mypy src/
 ```
@@ -161,7 +172,11 @@ Repo includes `railway.json` with `Dockerfile` build and `/health` check. Set th
 
 ## Supabase OAuth bridge
 
-`/oauth/authorize` stores PKCE state in Redis, redirects to Supabase `/auth/v1/authorize`, then `/oauth/callback` exchanges the Supabase code, mints a director-mcp JWT, and redirects to the client `redirect_uri` with an authorization `code`. `/oauth/token` completes PKCE and returns the MCP access token. Adjust Supabase token request body if your project uses a different grant/API version.
+Server-held PKCE: **`GET /oauth/authorize`** stores the MCP client’s PKCE + Claude `state` in Redis, generates a Supabase **`code_verifier` / `code_challenge`**, and redirects to **`/auth/v1/authorize`** with **`redirect_to`** = **`{MCP_BASE_URL}/oauth/idp-callback?mcp_oauth=…`** (no extra `state` query param — that broke GoTrue’s Google flow and caused **`bad_oauth_state`**).
+
+After Google, Supabase redirects to **`GET /oauth/idp-callback`** (or legacy **`/oauth/callback`**) with **`code=`**; the app calls **`POST …/auth/v1/token?grant_type=pkce`** with **`auth_code`** + **`code_verifier`**, then **`302`** to the MCP client `redirect_uri` with a one-time director code. **`POST /oauth/token`** completes MCP PKCE and returns the MCP JWT; Supabase **`access_token`** is stored in Redis for **`DIRECTOR_BASE_URL`** calls.
+
+Operator details: **[docs/oauth-fly-supabase-runbook.md](docs/oauth-fly-supabase-runbook.md)**.
 
 
 ## command to run mcp inspector

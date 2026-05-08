@@ -22,8 +22,11 @@ from src.config import Settings, get_settings
 log = structlog.get_logger(__name__)
 
 CODE_TTL = 600
-PKCE_PENDING_TTL = 600
+PKCE_PENDING_TTL = 900
 CLIENT_TTL = 86400 * 365
+
+# Supabase GoTrue: min code_verifier length per RFC 7636 (auth enforces similar bounds).
+_SUPABASE_VERIFIER_NUM_BYTES = 32
 
 class AuthConfigError(RuntimeError):
     pass
@@ -38,6 +41,28 @@ def verify_pkce(code_verifier: str, code_challenge: str) -> bool:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _opaque_prefix(value: str, n: int = 16) -> str:
+    """Log correlation (state, codes) without revealing raw values."""
+    return _token_hash(value)[:n]
+
+
+def _http_request_id(request: Request) -> str:
+    """Correlate logs with Fly / AWS / proxies without persisting secrets."""
+    return (
+        request.headers.get("fly-request-id")
+        or request.headers.get("x-request-id")
+        or secrets.token_hex(8)
+    )
+
+
+def _supabase_pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, S256 code_challenge) for Supabase /authorize + /token PKCE."""
+    verifier = secrets.token_urlsafe(_SUPABASE_VERIFIER_NUM_BYTES)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = _b64url_encode(digest)
+    return verifier, challenge
 
 
 def mcp_upstream_token_key(mcp_access_token: str) -> str:
@@ -173,82 +198,56 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             }
         )
 
-    @router.get("/oauth/authorize")
-    async def oauth_authorize(request: Request):
+    async def _oauth_supabase_return(request: Request) -> RedirectResponse:
+        """First-party return from Supabase OAuth (after Google / IdP). Correlation via mcp_oauth."""
         settings = get_settings()
         _ensure_https_production(request, settings)
+        req_id = _http_request_id(request)
         q = request.query_params
-        client_id = q.get("client_id")
-        redirect_uri = q.get("redirect_uri")
-        state = q.get("state")
-        code_challenge = q.get("code_challenge")
-        code_challenge_method = q.get("code_challenge_method")
-        if not client_id or not redirect_uri or not state or not code_challenge:
-            raise HTTPException(status_code=400, detail="missing required parameters")
-        if code_challenge_method != "S256":
-            raise HTTPException(status_code=400, detail="only S256 is supported")
-        if not settings.supabase_anon_key:
-            raise HTTPException(status_code=503, detail="Supabase not configured")
-
-        redis = await redis_client()
-        bridge = secrets.token_urlsafe(32)
-        pending = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "client_state": state,
-            "code_challenge": code_challenge,
-            "code_challenge_method": code_challenge_method,
-        }
-        await redis.setex(
-            f"oauth:pkce:pending:{bridge}",
-            PKCE_PENDING_TTL,
-            json.dumps(pending),
-        )
-
-        callback = f"{settings.mcp_base_url.rstrip('/')}/oauth/callback"
-        log.info(
-            "oauth_authorize_start",
-            bridge_sha256_prefix=_token_hash(bridge)[:16],
-            oauth_callback_url=callback,
-            mcp_client_redirect_host=urlparse(redirect_uri).netloc or "",
-            supabase_host=urlparse(settings.supabase_url).netloc,
-        )
-        supabase_authorize = (
-            f"{settings.supabase_url.rstrip('/')}/auth/v1/authorize"
-            f"?provider={quote(settings.supabase_oauth_provider)}"
-            f"&redirect_to={quote(callback, safe='')}"
-            f"&state={quote(bridge, safe='')}"
-        )
-        return RedirectResponse(supabase_authorize, status_code=302)
-
-    @router.get("/oauth/callback")
-    async def oauth_supabase_callback(request: Request, code: str | None = None, state: str | None = None):
-        settings = get_settings()
-        _ensure_https_production(request, settings)
-        if not code or not state:
+        correlation = q.get("mcp_oauth") or q.get("state")
+        code = q.get("code")
+        if not code or not correlation:
             log.warning(
-                "oauth_callback_missing_params",
+                "oauth_idp_callback_missing_params",
+                http_request_id=req_id,
                 has_code=bool(code),
-                has_state=bool(state),
+                has_correlation=bool(correlation),
             )
             raise HTTPException(status_code=400, detail="invalid callback")
+
         redis = await redis_client()
-        raw = await redis.get(f"oauth:pkce:pending:{state}")
-        state_h = _token_hash(str(state))[:16]
+        corr_p = _opaque_prefix(str(correlation))
+        code_p = _opaque_prefix(str(code))
+        raw = await redis.get(f"oauth:pkce:pending:{correlation}")
         if not raw:
             log.warning(
-                "oauth_callback_pending_miss",
-                state_sha256_prefix=state_h,
-                hint="Bridge expired, wrong Redis, duplicate tab, or MCP_BASE_URL changed mid-flow — check Supabase redirect allowlist if user lands on Site URL with bad_oauth_state.",
+                "oauth_supabase_return_pending_miss",
+                http_request_id=req_id,
+                correlation_sha256_prefix=corr_p,
+                oauth_code_sha256_prefix=code_p,
             )
             raise HTTPException(status_code=400, detail="unknown or expired state")
+
         pending = json.loads(raw)
+        supa_verifier = pending.get("supabase_code_verifier")
+        if not supa_verifier or not isinstance(supa_verifier, str):
+            log.warning(
+                "oauth_supabase_return_pending_malformed",
+                http_request_id=req_id,
+                correlation_sha256_prefix=corr_p,
+            )
+            raise HTTPException(status_code=400, detail="invalid oauth session")
+
         log.info(
-            "oauth_callback_pending_hit",
-            state_sha256_prefix=state_h,
+            "oauth_idp_callback_pending_hit",
+            http_request_id=req_id,
+            correlation_sha256_prefix=corr_p,
+            oauth_code_sha256_prefix=code_p,
         )
 
-        token_url = f"{settings.supabase_url.rstrip('/')}/auth/v1/token?grant_type=authorization_code"
+        # GoTrue exposes PKCE exchange as grant_type=pkce with JSON auth_code + code_verifier
+        # (not OAuth2-style grant_type=authorization_code / "code").
+        token_url = f"{settings.supabase_url.rstrip('/')}/auth/v1/token?grant_type=pkce"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 token_url,
@@ -257,15 +256,18 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "code": code,
+                    "auth_code": code,
+                    "code_verifier": supa_verifier,
                 },
             )
         if resp.status_code >= 400:
             err_snip = (resp.text or "")[:200]
             log.warning(
                 "supabase_token_exchange_failed",
+                http_request_id=req_id,
                 status=resp.status_code,
                 body_snippet=err_snip,
+                correlation_sha256_prefix=corr_p,
             )
             raise HTTPException(status_code=401, detail="supabase code exchange failed")
         body = resp.json()
@@ -274,7 +276,6 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             raise HTTPException(status_code=401, detail="no access token from supabase")
 
         try:
-            # Supabase JWT — verify signature optionally; decode without verify for sub fallback
             unverified = jwt.get_unverified_claims(access)
             user_id = str(unverified.get("sub", ""))
         except JWTError:
@@ -296,7 +297,7 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             CODE_TTL,
             json.dumps(code_payload),
         )
-        await redis.delete(f"oauth:pkce:pending:{state}")
+        await redis.delete(f"oauth:pkce:pending:{correlation}")
 
         dest = urlparse(pending["redirect_uri"])
         query = f"code={quote(director_code)}&state={quote(pending['client_state'])}"
@@ -308,15 +309,83 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             (dest.scheme, dest.netloc, dest.path, dest.params, new_query, dest.fragment)
         )
         log.info(
-            "oauth_callback_success_redirect",
+            "oauth_redirect_mcp_client",
+            http_request_id=req_id,
+            correlation_sha256_prefix=corr_p,
             mcp_client_redirect_host=dest.netloc or "",
         )
         return RedirectResponse(loc, status_code=302)
+
+    @router.get("/oauth/authorize")
+    async def oauth_authorize(request: Request):
+        settings = get_settings()
+        _ensure_https_production(request, settings)
+        q = request.query_params
+        client_id = q.get("client_id")
+        redirect_uri = q.get("redirect_uri")
+        state = q.get("state")
+        code_challenge = q.get("code_challenge")
+        code_challenge_method = q.get("code_challenge_method")
+        if not client_id or not redirect_uri or not state or not code_challenge:
+            raise HTTPException(status_code=400, detail="missing required parameters")
+        if code_challenge_method != "S256":
+            raise HTTPException(status_code=400, detail="only S256 is supported")
+        if not settings.supabase_anon_key:
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+
+        supa_verifier, supa_challenge = _supabase_pkce_pair()
+        redis = await redis_client()
+        bridge = secrets.token_urlsafe(32)
+        pending = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "client_state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "supabase_code_verifier": supa_verifier,
+        }
+        await redis.setex(
+            f"oauth:pkce:pending:{bridge}",
+            PKCE_PENDING_TTL,
+            json.dumps(pending),
+        )
+
+        public_base = settings.mcp_base_url.rstrip("/")
+        idp_callback = f"{public_base}/oauth/idp-callback?mcp_oauth={quote(bridge, safe='')}"
+        log.info(
+            "oauth_authorize_start",
+            http_request_id=_http_request_id(request),
+            correlation_sha256_prefix=_opaque_prefix(bridge),
+            oauth_idp_callback_url=idp_callback.split("?")[0],
+            supabase_server_pkce=True,
+            mcp_client_redirect_host=urlparse(redirect_uri).netloc or "",
+            supabase_host=urlparse(settings.supabase_url).netloc,
+        )
+        # No `state` query here: GoTrue forwards unknown params to Google as OAuth `state`,
+        # overriding the flow-state UUID and causing bad_oauth_state on /auth/v1/callback.
+        supabase_authorize = (
+            f"{settings.supabase_url.rstrip('/')}/auth/v1/authorize"
+            f"?provider={quote(settings.supabase_oauth_provider)}"
+            f"&redirect_to={quote(idp_callback, safe='')}"
+            f"&code_challenge={quote(supa_challenge, safe='')}"
+            f"&code_challenge_method=S256"
+        )
+        return RedirectResponse(supabase_authorize, status_code=302)
+
+    @router.get("/oauth/idp-callback")
+    async def oauth_idp_callback(request: Request):
+        return await _oauth_supabase_return(request)
+
+    @router.get("/oauth/callback")
+    async def oauth_supabase_callback(request: Request):
+        """Legacy path; prefer /oauth/idp-callback in Supabase redirect allowlists."""
+        return await _oauth_supabase_return(request)
 
     @router.post("/oauth/token")
     async def oauth_token(request: Request):
         settings = get_settings()
         _ensure_https_production(request, settings)
+        req_id = _http_request_id(request)
         form = await request.form()
         grant_type = form.get("grant_type")
         if grant_type != "authorization_code":
@@ -329,9 +398,19 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
         redis = await redis_client()
         raw = await redis.get(f"oauth:code:{code}")
         if not raw:
+            log.warning(
+                "oauth_token_code_miss",
+                http_request_id=req_id,
+                code_sha256_prefix=_opaque_prefix(code),
+            )
             raise HTTPException(status_code=401, detail="invalid code")
         payload = json.loads(raw)
         if not verify_pkce(code_verifier, payload["code_challenge"]):
+            log.warning(
+                "oauth_token_pkce_failed",
+                http_request_id=req_id,
+                code_sha256_prefix=_opaque_prefix(code),
+            )
             raise HTTPException(status_code=401, detail="invalid code_verifier")
 
         await redis.delete(f"oauth:code:{code}")
@@ -355,6 +434,11 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
                 upstream,
             )
         scope_str = " ".join(payload.get("scopes", []))
+        log.info(
+            "oauth_token_issued",
+            http_request_id=req_id,
+            mcp_token_sha256_prefix=_opaque_prefix(access_token),
+        )
         return JSONResponse(
             {
                 "access_token": access_token,
