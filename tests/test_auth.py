@@ -43,7 +43,7 @@ async def test_protected_resource_metadata():
         r = await ac.get("/.well-known/oauth-protected-resource")
     assert r.status_code == 200
     body = r.json()
-    assert body["resource"].endswith("/mcp")
+    assert body["resource"].endswith("/mcp/")
     await fake.aclose()
 
 

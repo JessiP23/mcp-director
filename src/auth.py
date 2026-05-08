@@ -162,9 +162,11 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
         settings = get_settings()
         _ensure_https_production(request, settings)
         base = settings.mcp_base_url.rstrip("/")
+        # Canonical resource URL must include trailing slash so clients (e.g. Claude)
+        # do not hit /mcp → 307 → /mcp/ during Streamable HTTP (breaks some clients).
         return JSONResponse(
             {
-                "resource": f"{base}/mcp",
+                "resource": f"{base}/mcp/",
                 "authorization_servers": [base],
                 "bearer_methods_supported": ["header"],
                 "scopes_supported": [
