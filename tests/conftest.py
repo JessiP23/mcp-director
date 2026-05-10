@@ -61,7 +61,7 @@ def mock_director(respx_mock, director_base_url):
     respx_mock.post(f"{director_base_url}/api/projects/").mock(
         return_value=httpx.Response(201, json={"id": "p-new", "name": "new"})
     )
-    respx_mock.post(f"{director_base_url}/mcp").mock(
+    respx_mock.post(f"{director_base_url}/mcp/").mock(
         return_value=httpx.Response(
             200,
             json={

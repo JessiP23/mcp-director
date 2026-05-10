@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 
 from src.client import DirectorClient, DirectorClientError
 from src.config import get_settings
-from src.job_tracker import JobTracker
+from src.job_tracker import DirectorTimeoutError, JobTracker
 from src.tools.pipeline import _user_client
 
 log = structlog.get_logger(__name__)
@@ -175,13 +175,22 @@ def register(mcp: FastMCP) -> None:
         redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
         try:
             tracker = JobTracker(redis)
-            outputs = await tracker.poll_until_done(
-                run_id,
-                user_id,
-                client,
-                timeout_seconds=max(60, timeout_seconds),
-                poll_interval=5.0,
-            )
+            try:
+                outputs = await tracker.poll_until_done(
+                    run_id,
+                    user_id,
+                    client,
+                    timeout_seconds=max(60, timeout_seconds),
+                    poll_interval=5.0,
+                )
+            except DirectorTimeoutError:
+                response["status"] = "running"
+                response["next_step"] = (
+                    "Run is still processing. Continue with director_run_status "
+                    "and director_run_outputs using this run_id."
+                )
+                response["timed_out_wait_seconds"] = max(60, timeout_seconds)
+                return response
             response["status"] = "completed"
             response["outputs"] = outputs
             return response

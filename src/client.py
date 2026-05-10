@@ -187,7 +187,14 @@ class DirectorClient:
             "method": method,
             "params": params or {},
         }
-        resp = await self._request("POST", "/mcp", json=body)
+        # director-cut's Streamable HTTP transport expects both JSON and SSE in Accept.
+        # Use the canonical trailing-slash path to avoid proxy redirect hops.
+        resp = await self._request(
+            "POST",
+            "/mcp/",
+            json=body,
+            headers={"Accept": "application/json, text/event-stream"},
+        )
         payload = self._json_response(resp, "post_mcp_jsonrpc")
         if payload is None:
             raise DirectorClientError(resp.status_code, "post_mcp_jsonrpc: empty body")

@@ -8,7 +8,7 @@ import structlog
 from fastmcp import Context
 from fastmcp import FastMCP
 
-from src.client import DirectorClient
+from src.client import DirectorClient, DirectorClientError
 from src.config import get_settings
 from src.job_tracker import JobTracker
 
@@ -85,7 +85,17 @@ def register(mcp: FastMCP) -> None:
     async def get_run_status(ctx: Context, run_id: str) -> dict:
         """Get the current status, stage, and progress of a pipeline run."""
         _, client = _user_client(ctx)
-        return await client.get_run(run_id)
+        try:
+            return await client.get_run(run_id)
+        except DirectorClientError as e:
+            if e.status_code == 404:
+                return {
+                    "run_id": run_id,
+                    "status": "missing",
+                    "error": "Run not found on director backend",
+                    "hint": "Call director_run_list to discover active/recent runs for this user.",
+                }
+            raise
 
     @mcp.tool(name="director_run_outputs")
     async def get_run_outputs(ctx: Context, run_id: str) -> dict:
@@ -94,7 +104,17 @@ def register(mcp: FastMCP) -> None:
         asset URLs, render URLs, and export paths.
         """
         _, client = _user_client(ctx)
-        return await client.get_run_outputs(run_id)
+        try:
+            return await client.get_run_outputs(run_id)
+        except DirectorClientError as e:
+            if e.status_code == 404:
+                return {
+                    "run_id": run_id,
+                    "status": "missing",
+                    "error": "Run outputs not found on director backend",
+                    "hint": "Call director_run_list to find available runs, then retry outputs.",
+                }
+            raise
 
     @mcp.tool(name="director_run_cancel")
     async def cancel_run(ctx: Context, run_id: str) -> dict:
