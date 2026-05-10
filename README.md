@@ -37,6 +37,8 @@ Hosted **Model Context Protocol** server for the **director-cut** AI video pipel
 
 **OAuth on Fly + Supabase (`bad_oauth_state`, redirect allowlist, `MCP_BASE_URL`):** **[docs/oauth-fly-supabase-runbook.md](docs/oauth-fly-supabase-runbook.md)**.
 
+**director-cut alignment prompt:** **[docs/cross-repo-agent-prompt.md](docs/cross-repo-agent-prompt.md)**.
+
 ## Environment
 
 Copy `.env.example` → `.env` and set at minimum:
@@ -120,9 +122,28 @@ ruff check src/ tests/
 mypy src/
 ```
 
-## Tools (19)
+## Tools (20)
 
 Tool names use **underscores** (e.g. `director_project_list`), not dots — some MCP clients (including Claude’s UI) only allow `^[a-zA-Z0-9_-]{1,64}$`.
+
+### Beginner-first content flow
+
+If users do not know tool names, start with a single high-level call:
+
+- `director_generate_content` — creates a project, starts a run, and can optionally wait for completion.
+
+Example user prompt in Claude:
+
+```text
+Use WM Studio MCP to generate a 30-second product teaser video for remote workers.
+Use style cinematic, platform youtube, and show me run_id + next steps.
+```
+
+For images, users can ask:
+
+```text
+Use WM Studio MCP to generate a launch thumbnail image for my product.
+```
 
 ### Pipeline — `director_run_*`, `director_project_*`
 

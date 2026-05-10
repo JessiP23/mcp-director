@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from src.client import DirectorClient
-from src.tools.creative import _parse_variation_dims, _slug_title
+from src.tools.creative import _normalize_content_type, _parse_variation_dims, _slug_title
 
 
 def test_parse_variation_dims_cartesian_input():
@@ -17,6 +17,17 @@ def test_parse_variation_dims_cartesian_input():
 
 def test_slug_title():
     assert "product" in _slug_title("Product Launch 2026 hero")
+
+
+def test_normalize_content_type_aliases():
+    assert _normalize_content_type("video") == "video"
+    assert _normalize_content_type("clips") == "video"
+    assert _normalize_content_type("thumbnail") == "image"
+
+
+def test_normalize_content_type_invalid():
+    with pytest.raises(ValueError):
+        _normalize_content_type("audio")
 
 
 @pytest.mark.asyncio

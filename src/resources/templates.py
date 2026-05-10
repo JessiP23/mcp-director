@@ -97,3 +97,26 @@ Vary tone and pacing. Return all run_ids and poll for completion.
 """.strip(),
             }
         ]
+
+    @mcp.prompt("director://prompts/easy-content-request")
+    def easy_content_request(
+        brief: str,
+        content_type: str = "video",
+        style: str = "cinematic",
+        platform: str = "youtube",
+    ) -> list:
+        """Simple starter prompt for non-technical users."""
+        return [
+            {
+                "role": "user",
+                "content": f"""
+Use director_generate_content for this request:
+- brief: {brief}
+- content_type: {content_type}
+- style: {style}
+- platform: {platform}
+
+If a run is queued, poll with director_run_status and return a concise summary with run_id.
+""".strip(),
+            }
+        ]

@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 
 from src.client import DirectorClient, DirectorClientError
 from src.config import get_settings
+from src.job_tracker import JobTracker
 from src.tools.pipeline import _user_client
 
 log = structlog.get_logger(__name__)
@@ -35,6 +36,24 @@ def _parse_variation_dims(variation_dimensions: list[str]) -> dict[str, list[str
 def _slug_title(brief: str) -> str:
     words = re.findall(r"[A-Za-z0-9]+", brief[:48])
     return "-".join(w.lower() for w in words[:6]) or "production"
+
+
+def _normalize_content_type(content_type: str) -> str:
+    c = content_type.strip().lower()
+    aliases = {
+        "video": "video",
+        "videos": "video",
+        "clip": "video",
+        "clips": "video",
+        "image": "image",
+        "images": "image",
+        "thumbnail": "image",
+        "thumbnails": "image",
+        "poster": "image",
+    }
+    if c not in aliases:
+        raise ValueError("content_type must be one of: video, image")
+    return aliases[c]
 
 
 async def _expand_brief_with_llm(
@@ -89,6 +108,86 @@ async def _expand_brief_with_llm(
 
 
 def register(mcp: FastMCP) -> None:
+    @mcp.tool(name="director_generate_content")
+    async def generate_content(
+        ctx: Context,
+        brief: str,
+        content_type: str = "video",
+        style: str = "cinematic",
+        platform: str = "youtube",
+        duration_target_seconds: int = 60,
+        project_name: str = "",
+        wait_for_completion: bool = False,
+        timeout_seconds: int = 900,
+    ) -> dict:
+        """
+        Beginner-friendly content generation entrypoint.
+
+        Creates (or reuses) a project, applies sensible defaults, starts a run,
+        and optionally waits for completion. Use this when users don't know the
+        lower-level tool set yet.
+        """
+        user_id, client = _user_client(ctx)
+        normalized = _normalize_content_type(content_type)
+        run_duration = max(8, duration_target_seconds)
+        settings, plan = await _expand_brief_with_llm(
+            client,
+            brief,
+            style,
+            run_duration,
+            platform,
+        )
+        if normalized == "image":
+            # Keep image requests fast and deterministic by default.
+            settings.update(
+                {
+                    "target_output": "image",
+                    "scene_count": 1,
+                    "target_duration_seconds": 8,
+                }
+            )
+            run_duration = 8
+        else:
+            settings["target_duration_seconds"] = run_duration
+
+        name = project_name.strip() or f"{_slug_title(brief)}-{normalized}"
+        proj = await client.create_project(name=name[:80], description=brief[:500])
+        project_id = str(proj.get("id") or proj.get("project_id") or "")
+        if not project_id:
+            raise RuntimeError("could not create a project for content generation")
+
+        run = await client.create_run(project_id, brief, settings)
+        run_id = str(run.get("id") or run.get("run_id") or "")
+        if not run_id:
+            raise RuntimeError("run creation failed")
+
+        response = {
+            "run_id": run_id,
+            "project_id": project_id,
+            "content_type": normalized,
+            "production_plan": plan,
+            "status": str(run.get("status") or "queued"),
+            "next_step": "Poll with director_run_status or set wait_for_completion=true.",
+        }
+        if not wait_for_completion:
+            return response
+
+        redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+        try:
+            tracker = JobTracker(redis)
+            outputs = await tracker.poll_until_done(
+                run_id,
+                user_id,
+                client,
+                timeout_seconds=max(60, timeout_seconds),
+                poll_interval=5.0,
+            )
+            response["status"] = "completed"
+            response["outputs"] = outputs
+            return response
+        finally:
+            await redis.aclose()
+
     @mcp.tool(name="director_creative_brief_to_run")
     async def brief_to_run(
         ctx: Context,
