@@ -23,5 +23,6 @@ src/tools/insights.py
 src/tools/pipeline.py
 tests/test_auth.py
 tests/test_job_tracker.py
+tests/test_server_mcp_path.py
 tests/test_tools_creative.py
 tests/test_tools_pipeline.py

@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 
 from src.client import DirectorClient, DirectorClientError
 from src.config import get_settings
-from src.job_tracker import DirectorTimeoutError, JobTracker
+from src.job_tracker import DirectorJobError, DirectorTimeoutError, JobTracker
 from src.tools.pipeline import _user_client
 
 log = structlog.get_logger(__name__)
@@ -64,27 +64,21 @@ async def _expand_brief_with_llm(
     platform: str,
 ) -> tuple[dict, str]:
     try:
-        result = await client.post_mcp_jsonrpc(
-            "tools/call",
-            params={
-                "name": "director_service_llm",
-                "arguments": {
-                    "task": "brief_to_settings",
-                    "brief": brief,
-                    "style": style,
-                    "duration_target_seconds": duration_target_seconds,
-                    "platform": platform,
-                },
-            },
+        result = await client.post_brief_expand(
+            brief=brief,
+            style=style,
+            duration_target_seconds=duration_target_seconds,
+            platform=platform,
+            content_type="video",
         )
-        if isinstance(result, dict) and result.get("structuredContent"):
-            sc = result["structuredContent"]
-            if isinstance(sc, dict):
-                settings = sc.get("settings", sc)
-                plan = sc.get("production_plan") or sc.get("summary") or ""
-                return settings if isinstance(settings, dict) else {}, str(plan)
-        if isinstance(result, dict) and "settings" in result:
-            return result["settings"], str(result.get("production_plan", ""))
+        settings = result.get("settings") if isinstance(result, dict) else None
+        plan = (
+            result.get("production_plan")
+            if isinstance(result, dict)
+            else None
+        )
+        if isinstance(settings, dict):
+            return settings, str(plan or "")
     except DirectorClientError as e:
         log.info("brief_llm_fallback", reason=str(e))
     scenes = max(3, min(18, duration_target_seconds // 6))
@@ -183,6 +177,15 @@ def register(mcp: FastMCP) -> None:
                     timeout_seconds=max(60, timeout_seconds),
                     poll_interval=5.0,
                 )
+            except DirectorJobError as e:
+                response["status"] = "failed"
+                response["error"] = str(e)
+                response["next_step"] = (
+                    "Director-cut ended this run with an error. "
+                    "Check director-cut Fly logs for the same run_id; "
+                    "fix API keys, LLM, or render dependencies, then retry."
+                )
+                return response
             except DirectorTimeoutError:
                 response["status"] = "running"
                 response["next_step"] = (

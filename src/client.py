@@ -132,6 +132,17 @@ class DirectorClient:
         assert isinstance(data, dict)
         return data
 
+    async def get_run_errors(self, run_id: str) -> list[dict[str, Any]]:
+        """Fetch error log rows from director-cut (non-empty when a run has failed)."""
+        resp = await self._request("GET", f"/api/runs/{run_id}/errors")
+        if resp.status_code == 404:
+            return []
+        data = self._json_response(resp, "get_run_errors")
+        if not isinstance(data, dict):
+            return []
+        errors = data.get("errors")
+        return errors if isinstance(errors, list) else []
+
     async def list_projects(self) -> list:
         resp = await self._request("GET", "/api/projects/")
         data = self._json_response(resp, "list_projects")
@@ -203,6 +214,34 @@ class DirectorClient:
             err = payload["error"]
             raise DirectorClientError(int(err.get("code", -1)), str(err.get("message", err)))
         return payload.get("result", payload)
+
+    async def post_brief_expand(
+        self,
+        *,
+        brief: str,
+        style: str,
+        duration_target_seconds: int,
+        platform: str,
+        content_type: str = "video",
+    ) -> dict:
+        """Call director-cut stateless creative helper (no MCP session required)."""
+        resp = await self._request(
+            "POST",
+            "/api/creative/brief-expand",
+            json={
+                "brief": brief,
+                "style": style,
+                "duration_target_seconds": duration_target_seconds,
+                "platform": platform,
+                "content_type": content_type,
+            },
+        )
+        data = self._json_response(resp, "post_brief_expand")
+        if data is None:
+            raise DirectorClientError(resp.status_code, "post_brief_expand: empty body")
+        if not isinstance(data, dict):
+            raise DirectorClientError(resp.status_code, "post_brief_expand: invalid response")
+        return data
 
     async def get_settings_public(self) -> dict:
         resp = await self._request("GET", "/api/settings/")

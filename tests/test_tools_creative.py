@@ -41,6 +41,23 @@ async def test_mcp_llm_jsonrpc(mock_director, director_base_url):
 
 
 @pytest.mark.asyncio
+async def test_brief_expand_endpoint(mock_director, director_base_url):
+    c = DirectorClient(director_base_url, "tok")
+    try:
+        r = await c.post_brief_expand(
+            brief="Holiday launch image",
+            style="cinematic",
+            duration_target_seconds=30,
+            platform="instagram",
+            content_type="image",
+        )
+        assert r.get("settings", {}).get("scene_count") == 5
+        assert "production_plan" in r
+    finally:
+        await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_remix_run_end_to_end(respx_mock, director_base_url):
     respx_mock.get(f"{director_base_url}/api/runs/src").mock(
         return_value=httpx.Response(

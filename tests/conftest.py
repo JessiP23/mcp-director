@@ -61,6 +61,16 @@ def mock_director(respx_mock, director_base_url):
     respx_mock.post(f"{director_base_url}/api/projects/").mock(
         return_value=httpx.Response(201, json={"id": "p-new", "name": "new"})
     )
+    respx_mock.post(f"{director_base_url}/api/creative/brief-expand").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "settings": {"video_model": "quality", "scene_count": 5},
+                "production_plan": "Five scenes with cinematic pacing.",
+                "request_id": "test-req-id",
+            },
+        )
+    )
     respx_mock.post(f"{director_base_url}/mcp/").mock(
         return_value=httpx.Response(
             200,

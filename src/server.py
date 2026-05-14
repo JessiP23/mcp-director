@@ -10,11 +10,13 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from fastmcp import FastMCP
 from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
-from src.auth import build_oauth_router
+from src.auth import build_oauth_router, validate_mcp_token
 from src.config import get_settings
 from src.middleware.auth_guard import AuthGuardMiddleware
 from src.resources.templates import register_resources
 from src.tools import assets, creative, insights, pipeline
+
+log = structlog.get_logger(__name__)
 
 structlog.configure(
     processors=[
@@ -82,6 +84,20 @@ root_app = FastAPI(title="director-mcp", lifespan=_lifespan)
 
 root_app.include_router(build_oauth_router(), prefix="")
 
+def _www_authenticate_header(settings) -> str:
+    """RFC 6750 + RFC 9728 challenge advertising the resource metadata URL.
+
+    Claude.ai (and other MCP clients) drive the OAuth flow off this header; without
+    it, a missing/invalid bearer surfaces as a generic JSON-RPC error and the client
+    never re-initiates auth.
+    """
+    base = settings.mcp_base_url.rstrip("/")
+    return (
+        f'Bearer realm="{settings.mcp_audience}", '
+        f'resource_metadata="{base}/.well-known/oauth-protected-resource"'
+    )
+
+
 @root_app.middleware("http")
 async def _https_guard(request: Request, call_next):
     # Starlette Mount("/mcp") only matches /mcp/{path}; bare /mcp never reaches MCP.
@@ -97,6 +113,68 @@ async def _https_guard(request: Request, call_next):
         proto = request.headers.get("x-forwarded-proto", request.url.scheme)
         if proto != "https":
             return JSONResponse({"detail": "HTTPS required"}, status_code=400)
+    return await call_next(request)
+
+
+@root_app.middleware("http")
+async def _mcp_bearer_gate(request: Request, call_next):
+    """HTTP-level 401 with WWW-Authenticate for /mcp/* — MCP spec compliance.
+
+    AuthGuardMiddleware (FastMCP layer) raises McpError on missing/invalid bearer,
+    which the streamable-HTTP transport surfaces as a 200 with JSON-RPC error.
+    Claude.ai's connector lib only re-initiates OAuth on a real HTTP 401 with
+    WWW-Authenticate. This gate runs BEFORE the mounted MCP app and returns the
+    spec-correct response so the client knows to re-auth.
+    """
+    path = request.scope.get("path", "")
+    if not path.startswith("/mcp/"):
+        return await call_next(request)
+    if request.method == "OPTIONS":  # CORS preflight
+        return await call_next(request)
+
+    settings = get_settings()
+    auth_header = request.headers.get("authorization", "")
+    challenge = _www_authenticate_header(settings)
+
+    if not auth_header.lower().startswith("bearer "):
+        log.info(
+            "mcp_request_missing_bearer",
+            path=path,
+            method=request.method,
+            ua=request.headers.get("user-agent", "")[:80],
+        )
+        return JSONResponse(
+            {"error": "unauthorized", "error_description": "Bearer token required"},
+            status_code=401,
+            headers={"WWW-Authenticate": challenge},
+        )
+
+    token = auth_header.split(" ", 1)[1].strip()
+    redis = getattr(root_app.state, "redis", None)
+    try:
+        await validate_mcp_token(token, redis=redis)
+    except ValueError as e:
+        log.info(
+            "mcp_request_invalid_bearer",
+            path=path,
+            method=request.method,
+            reason=str(e),
+            token_prefix=token[:12],
+        )
+        return JSONResponse(
+            {
+                "error": "invalid_token",
+                "error_description": "The access token is invalid or expired.",
+            },
+            status_code=401,
+            headers={
+                "WWW-Authenticate": (
+                    challenge + ', error="invalid_token", '
+                    'error_description="The access token is invalid or expired."'
+                )
+            },
+        )
+
     return await call_next(request)
 
 @root_app.get("/health")

@@ -22,7 +22,7 @@ from src.config import Settings, get_settings
 log = structlog.get_logger(__name__)
 
 CODE_TTL = 600
-PKCE_PENDING_TTL = 900
+PKCE_PENDING_TTL = 1800  # 30min — covers slow IdP sign-in + 2FA without breaking the flow.
 CLIENT_TTL = 86400 * 365
 
 # Supabase GoTrue: min code_verifier length per RFC 7636 (auth enforces similar bounds).
@@ -74,16 +74,23 @@ def create_mcp_access_token(
     settings: Settings,
     user_id: str,
     scopes: list[str],
+    client_id: str | None = None,
 ) -> tuple[str, int]:
     now = int(time.time())
     exp = now + settings.token_ttl_seconds
-    payload = {
+    payload: dict[str, Any] = {
+        "iss": settings.mcp_base_url.rstrip("/"),
         "sub": user_id,
         "aud": settings.mcp_audience,
         "iat": now,
+        "nbf": now,
         "exp": exp,
+        "jti": secrets.token_urlsafe(16),
         "scopes": scopes,
     }
+    if client_id:
+        payload["azp"] = client_id
+        payload["client_id"] = client_id
     token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
     return token, settings.token_ttl_seconds
 
@@ -122,6 +129,11 @@ async def validate_mcp_token(token: str, *, redis: Redis | None = None) -> dict[
             audience=settings.mcp_audience,
         )
     except JWTError as e:
+        log.warning(
+            "mcp_token_validation_failed",
+            reason=str(e),
+            token_prefix=token[:12] if token else "",
+        )
         raise ValueError("invalid token") from e
     th = _token_hash(token)
     if redis:
@@ -421,6 +433,7 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             settings=settings,
             user_id=payload["user_id"],
             scopes=list(payload.get("scopes", [])),
+            client_id=payload.get("client_id"),
         )
         th = _token_hash(access_token)
         await redis.setex(
@@ -441,13 +454,19 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             http_request_id=req_id,
             mcp_token_sha256_prefix=_opaque_prefix(access_token),
         )
+        # OAuth 2.1 §3.1.5: token endpoint responses MUST set Cache-Control: no-store.
+        # Some clients (incl. Claude.ai) treat cached/replayed token responses as failures.
         return JSONResponse(
             {
                 "access_token": access_token,
                 "token_type": "Bearer",
                 "expires_in": expires_in,
                 "scope": scope_str,
-            }
+            },
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+            },
         )
 
     @router.post("/oauth/register")

@@ -25,6 +25,26 @@ class DirectorTimeoutError(TimeoutError):
     pass
 
 
+async def _failure_message_for_run(
+    director_client: DirectorClient, run_id: str, run: dict[str, Any], status: str
+) -> str:
+    """Prefer last_error on GET /runs/:id, then error log; avoids extra /errors round-trip."""
+    err = run.get("last_error") or run.get("error") or run.get("message")
+    if err and str(err).strip().lower() not in ("", "failed", str(status).lower()):
+        return str(err)
+    try:
+        rows = await director_client.get_run_errors(run_id)
+    except DirectorClientError:
+        rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        msg = row.get("message")
+        if msg and str(msg).strip():
+            return str(msg)
+    return status
+
+
 class JobTracker:
     JOB_TTL = 86400
 
@@ -84,6 +104,7 @@ class JobTracker:
         *,
         timeout_seconds: int = 600,
         poll_interval: float = 5.0,
+        stall_seconds: int = 120,
         report_progress: ProgressCallback = None,
         job_key: str | None = None,
     ) -> dict:
@@ -91,22 +112,33 @@ class JobTracker:
             job_key = await self.submit(run_id, user_id, {"run_id": run_id})
         deadline = time.monotonic() + timeout_seconds
         last_stage = "polling"
+        last_stage_change = time.monotonic()
         while time.monotonic() < deadline:
             try:
                 run = await director_client.get_run(run_id)
             except DirectorClientError as e:
                 await self.mark_failed(job_key, str(e))
+                if e.status_code == 404:
+                    raise DirectorJobError(
+                        f"Run {run_id} disappeared from the backend (404). "
+                        "This usually means the director-cut database was reset or "
+                        "the run was evicted. Check director-cut Fly volume/db persistence."
+                    ) from e
                 raise
             status = str(run.get("status") or run.get("state") or "").lower()
             stage = str(run.get("stage") or run.get("current_stage") or last_stage)
-            last_stage = stage
+            if stage != last_stage:
+                last_stage = stage
+                last_stage_change = time.monotonic()
             elapsed = timeout_seconds - max(0, deadline - time.monotonic())
+            stall_elapsed = time.monotonic() - last_stage_change
             if report_progress:
                 await report_progress(
                     {
                         "stage": stage,
                         "elapsed_seconds": round(elapsed, 2),
                         "estimated_remaining": max(0, round(deadline - time.monotonic(), 2)),
+                        "stalled_seconds": round(stall_elapsed, 0) if stall_elapsed > 30 else 0,
                     }
                 )
             if status in ("completed", "success", "succeeded", "done"):
@@ -114,9 +146,20 @@ class JobTracker:
                 await self.mark_complete(job_key, outputs)
                 return outputs
             if status in ("failed", "error", "cancelled", "canceled"):
-                err = run.get("error") or run.get("message") or status
+                err = await _failure_message_for_run(
+                    director_client, run_id, run, status
+                )
                 await self.mark_failed(job_key, str(err))
                 raise DirectorJobError(str(err))
+            # Detect stall: stage hasn't changed in stall_seconds
+            if stall_elapsed > stall_seconds:
+                msg = (
+                    f"Run {run_id} has been in stage '{stage}' for "
+                    f"{round(stall_elapsed)}s without progress. "
+                    "The director-cut render process may have stalled or crashed."
+                )
+                await self.mark_failed(job_key, msg)
+                raise DirectorJobError(msg)
             await asyncio.sleep(poll_interval)
 
         await self.mark_failed(job_key, "timeout")

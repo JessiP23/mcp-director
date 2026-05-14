@@ -83,19 +83,54 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="director_run_status")
     async def get_run_status(ctx: Context, run_id: str) -> dict:
-        """Get the current status, stage, and progress of a pipeline run."""
+        """
+        Get the current status, stage, and progress of a pipeline run.
+        Returns stall_warning when a run stage has not advanced for >2 minutes.
+        """
+        import time as _time
+        from datetime import datetime, timezone
+
         _, client = _user_client(ctx)
         try:
-            return await client.get_run(run_id)
+            run = await client.get_run(run_id)
         except DirectorClientError as e:
             if e.status_code == 404:
                 return {
                     "run_id": run_id,
                     "status": "missing",
-                    "error": "Run not found on director backend",
-                    "hint": "Call director_run_list to discover active/recent runs for this user.",
+                    "error": "Run not found on director backend — it was likely dropped when the backend restarted.",
+                    "hint": (
+                        "The director-cut Fly machine restarts and loses all runs because it uses "
+                        "an ephemeral SQLite database. "
+                        "You need to add a Fly persistent volume and mount the DB to it. "
+                        "Call director_run_list to see if there are newer runs you can poll instead."
+                    ),
                 }
             raise
+
+        # Stall detection: flag if updated_at hasn't changed in 120s
+        stall_warning = None
+        updated_raw = run.get("updated_at") or run.get("updatedAt") or run.get("last_updated")
+        if updated_raw:
+            try:
+                if isinstance(updated_raw, (int, float)):
+                    updated_ts = float(updated_raw)
+                else:
+                    dt = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00"))
+                    updated_ts = dt.timestamp()
+                stall_secs = _time.time() - updated_ts
+                if stall_secs > 120:
+                    stall_warning = (
+                        f"Run has not progressed in {round(stall_secs)}s. "
+                        "The render process may have stalled or the backend restarted."
+                    )
+            except Exception:
+                pass
+
+        result = dict(run)
+        if stall_warning:
+            result["stall_warning"] = stall_warning
+        return result
 
     @mcp.tool(name="director_run_outputs")
     async def get_run_outputs(ctx: Context, run_id: str) -> dict:
