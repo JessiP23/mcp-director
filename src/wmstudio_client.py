@@ -56,17 +56,36 @@ class WMStudioClient:
 
     def _parse(self, resp: httpx.Response, ctx: str) -> dict[str, Any]:
         raw = (resp.text or "").strip()
+        content_type = (resp.headers.get("content-type") or "").lower()
+        is_html = (
+            "text/html" in content_type
+            or raw.startswith("<!DOCTYPE")
+            or raw.startswith("<html")
+            or raw.startswith("<script")
+        )
         if resp.status_code >= 400:
-            try:
-                payload = json.loads(raw) if raw else None
-            except json.JSONDecodeError:
-                payload = None
-            msg = (
-                (payload or {}).get("error")
-                or (payload or {}).get("message")
-                or raw[:300]
-                or resp.reason_phrase
-            )
+            payload: Any = None
+            if not is_html:
+                try:
+                    payload = json.loads(raw) if raw else None
+                except json.JSONDecodeError:
+                    payload = None
+            if is_html and resp.status_code == 404:
+                # Most common cause: a Next.js route that doesn't exist on the
+                # currently-deployed wmstudio container (e.g. mid-deploy swap).
+                msg = (
+                    "endpoint not found on wmstudio — route may not be deployed yet "
+                    "or WMSTUDIO_API_URL points at the wrong host"
+                )
+            elif is_html:
+                msg = f"wmstudio returned an HTML page (likely an error page) — {resp.reason_phrase}"
+            else:
+                msg = (
+                    (payload or {}).get("error")
+                    or (payload or {}).get("message")
+                    or raw[:300]
+                    or resp.reason_phrase
+                )
             raise WMStudioClientError(resp.status_code, f"{ctx}: {msg}", payload)
         if not raw:
             return {}
