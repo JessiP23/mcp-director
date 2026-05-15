@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     # WM Studio (Next.js app) base URL. The studio_* tools forward to /api/creative-studio/*
     # and /api/jobs/* using the upstream Supabase access token retrieved at OAuth exchange.
     wmstudio_api_url: str = Field(default="http://localhost:3000", alias="WMSTUDIO_API_URL")
+    # Public drag-and-drop upload page surfaced when an MCP tool needs an asset
+    # URL but the caller didn't provide one. Defaults to director-cut's public
+    # /upload page (returns a fal CDN URL ready to paste into the next call).
+    asset_upload_url: str = Field(
+        default="https://director-cut.fly.dev/upload",
+        alias="ASSET_UPLOAD_URL",
+    )
     # Optional: Supabase / WM Studio access JWT for director-cut API. Only applied when
     # `ENVIRONMENT=development` (e.g. smoke tests with create_test_token). OAuth clients
     # use the Supabase token stored in Redis at token exchange instead.

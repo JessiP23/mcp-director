@@ -61,9 +61,13 @@ def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
 def _upload_required(asset_kind: str, param_name: str) -> dict[str, Any]:
     """Return a structured "please upload" response when the caller has no
     public URL for an image/video. Claude can render `uploadUrl` as a link.
+
+    The default `uploadUrl` is director-cut's public drag-and-drop page at
+    `https://director-cut.fly.dev/upload`, which uploads to fal's CDN and
+    returns a stable URL ready to paste into the next tool call. Override
+    via the `ASSET_UPLOAD_URL` env var.
     """
-    base = get_settings().wmstudio_api_url.rstrip("/")
-    upload_url = f"{base}/dashboard/creative-studio"
+    upload_url = get_settings().asset_upload_url
     return {
         "ok": False,
         "error": "asset_url_required",
@@ -72,8 +76,8 @@ def _upload_required(asset_kind: str, param_name: str) -> dict[str, Any]:
         "uploadUrl": upload_url,
         "message": (
             f"This tool needs a publicly accessible {asset_kind} URL via `{param_name}`. "
-            f"If your file is local, upload it at {upload_url} and copy the resulting "
-            f"URL into `{param_name}` to retry."
+            f"If your file is local, drag-and-drop it at {upload_url} — the page returns "
+            f"a public CDN URL you can paste into `{param_name}` to retry."
         ),
     }
 
