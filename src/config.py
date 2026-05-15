@@ -24,6 +24,16 @@ class Settings(BaseSettings):
         default="https://director-cut.fly.dev/upload",
         alias="ASSET_UPLOAD_URL",
     )
+    # URL surfaced when the user runs out of credits (HTTP 402 from wmstudio).
+    # Tools return this in a structured `upgrade_required` response so Claude
+    # can render it as a clickable link and stop generating.
+    credits_upgrade_url: str = Field(
+        default="https://wmstudio.io/dashboard/credits",
+        alias="CREDITS_UPGRADE_URL",
+    )
+    # When `creditsRemaining` falls at or below this value after a generation,
+    # tools attach a `lowCreditsWarning` so Claude can warn the user.
+    credits_low_threshold: int = Field(default=20, alias="CREDITS_LOW_THRESHOLD")
     # Optional: Supabase / WM Studio access JWT for director-cut API. Only applied when
     # `ENVIRONMENT=development` (e.g. smoke tests with create_test_token). OAuth clients
     # use the Supabase token stored in Redis at token exchange instead.

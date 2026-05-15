@@ -20,7 +20,12 @@ from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_request
 
 from src.config import get_settings
-from src.wmstudio_client import WMStudioClient, WMStudioClientError, get_user_wmstudio_client
+from src.wmstudio_client import (
+    InsufficientCreditsError,
+    WMStudioClient,
+    WMStudioClientError,
+    get_user_wmstudio_client,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -100,6 +105,90 @@ _TRUSTED_ASSET_HOSTS = (
     "director-cut.fly.dev",
     "supabase.co",
 )
+
+
+def _upgrade_required(payload: Any) -> dict[str, Any]:
+    """Structured response when wmstudio rejects with HTTP 402 (insufficient credits).
+
+    Claude renders `upgradeUrl` as a clickable link. The flat `error` /
+    `message` fields are designed so Claude stops the workflow loop —
+    further tool calls before topping up will hit the same wall.
+    """
+    upgrade_url = get_settings().credits_upgrade_url
+    body = payload if isinstance(payload, dict) else {}
+    required = body.get("requiredCredits") or body.get("requiredCost")
+    available = body.get("availableCredits") or body.get("balanceCredits")
+    return {
+        "ok": False,
+        "error": "upgrade_required",
+        "reason": "insufficient_credits",
+        "upgradeUrl": upgrade_url,
+        "requiredCredits": required,
+        "availableCredits": available,
+        "message": (
+            f"You don't have enough credits for this generation"
+            + (f" (needs {required}, have {available})" if required and available is not None else "")
+            + f". Upgrade or top up at {upgrade_url}, then retry. "
+            f"DO NOT call further generation tools until credits are added."
+        ),
+    }
+
+
+async def _attach_credit_status(client: WMStudioClient, result: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort: append `creditsRemaining` + low-credit warning to a successful tool response.
+
+    Failure to fetch the balance must NEVER fail the tool — generation already
+    succeeded. We swallow errors silently and log at debug level.
+    """
+    try:
+        bal = await client.credits_balance()
+    except Exception as e:  # noqa: BLE001 — non-critical post-generation step
+        log.debug("post_generation_balance_fetch_failed", error=str(e)[:120])
+        return result
+    settings = get_settings()
+    total = bal.get("totalBalance")
+    if total is None:
+        total = bal.get("balanceCredits")
+    if total is None:
+        return result
+    try:
+        total_int = int(total)
+    except (TypeError, ValueError):
+        return result
+    result["creditsRemaining"] = total_int
+    if total_int <= settings.credits_low_threshold:
+        result["lowCreditsWarning"] = True
+        result["upgradeUrl"] = settings.credits_upgrade_url
+        result["lowCreditsMessage"] = (
+            f"Only {total_int} credits remaining. Top up at {settings.credits_upgrade_url} "
+            f"to avoid interruption on the next generation."
+        )
+    return result
+
+
+async def _run_billed(
+    client: WMStudioClient,
+    op,  # type: ignore[no-untyped-def] — bound coroutine method
+    *args: Any,
+) -> dict[str, Any]:
+    """Run a billed wmstudio operation with credit-aware error handling.
+
+    - HTTP 402 (`requiresTopUp: true`) → structured upgrade response (no exception).
+    - Success → response is augmented with `creditsRemaining` + low-credit warning.
+    - Other upstream errors propagate as `WMStudioClientError` for the tool's
+      own catch (or surface as MCP error).
+    """
+    try:
+        result = await op(*args)
+    except InsufficientCreditsError as e:
+        log.info(
+            "studio_tool_insufficient_credits",
+            payload_keys=list(e.payload.keys()) if isinstance(e.payload, dict) else None,
+        )
+        return _upgrade_required(e.payload)
+    if not isinstance(result, dict):
+        return result  # type: ignore[unreachable]
+    return await _attach_credit_status(client, result)
 
 
 async def _gate_asset_url(
@@ -187,7 +276,7 @@ def register(mcp: FastMCP) -> None:
                 "num_images": num_images,
                 "seed": seed,
             })
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -229,7 +318,7 @@ def register(mcp: FastMCP) -> None:
                 "output_format": output_format,
                 "prompt": "",  # required by route shape; ignored by upscale handlers
             }
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -263,7 +352,7 @@ def register(mcp: FastMCP) -> None:
                 "imageUrl": image_url,
                 "metadata": {"toolId": "camera_angles", "camera": camera},
             })
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -300,7 +389,7 @@ def register(mcp: FastMCP) -> None:
                 "imageUrl": product_image_url,
                 "metadata": metadata,
             })
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -335,7 +424,7 @@ def register(mcp: FastMCP) -> None:
                 "aspect_ratio": aspect_ratio,
                 "metadata": metadata,
             })
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -363,7 +452,7 @@ def register(mcp: FastMCP) -> None:
                 "digitalTwinProfileId": digital_twin_profile_id,
                 "digitalTwinEnhancementPreset": enhancement_preset,
             })
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -401,7 +490,7 @@ def register(mcp: FastMCP) -> None:
                 "imageUrl": product_image_url,
                 "metadata": metadata,
             })
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -431,7 +520,7 @@ def register(mcp: FastMCP) -> None:
                 "prompt": "",
                 "metadata": {"toolId": "convert_to_3d", "is3D": True},
             }
-            return await client.generate_image(payload)
+            return await _run_billed(client, client.generate_image, payload)
         finally:
             await client.aclose()
 
@@ -465,7 +554,7 @@ def register(mcp: FastMCP) -> None:
                 "aspect_ratio": aspect_ratio,
                 "duration": duration,
             })
-            return await client.generate_video(payload)
+            return await _run_billed(client, client.generate_video, payload)
         finally:
             await client.aclose()
 
@@ -493,7 +582,7 @@ def register(mcp: FastMCP) -> None:
                 "upscale_factor": upscale_factor,
                 "target_fps": target_fps,
             })
-            return await client.upscale_video(payload)
+            return await _run_billed(client, client.upscale_video, payload)
         finally:
             await client.aclose()
 

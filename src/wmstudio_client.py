@@ -32,6 +32,14 @@ class WMStudioClientError(Exception):
         super().__init__(f"{status_code}: {message}")
 
 
+class InsufficientCreditsError(WMStudioClientError):
+    """Raised on HTTP 402 with `requiresTopUp: true`.
+
+    `payload` carries the wmstudio response body — typically includes
+    `requiredCredits`, `availableCredits`, `model`, and a friendly message.
+    """
+
+
 class WMStudioClient:
     """Thin wrapper around httpx targeting the WM Studio Next.js API."""
 
@@ -70,6 +78,12 @@ class WMStudioClient:
                     payload = json.loads(raw) if raw else None
                 except json.JSONDecodeError:
                     payload = None
+            # OAuth 2 §5: 402 + `requiresTopUp: true` is wmstudio's signal that
+            # the user can't afford this generation. Surface as a typed error
+            # so tools can return a structured upgrade response.
+            if resp.status_code == 402 and isinstance(payload, dict) and payload.get("requiresTopUp"):
+                msg = str(payload.get("message") or payload.get("error") or "insufficient credits")
+                raise InsufficientCreditsError(402, f"{ctx}: {msg}", payload)
             if is_html and resp.status_code == 404:
                 # Most common cause: a Next.js route that doesn't exist on the
                 # currently-deployed wmstudio container (e.g. mid-deploy swap).
