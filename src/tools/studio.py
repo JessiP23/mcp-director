@@ -97,14 +97,29 @@ def register(mcp: FastMCP) -> None:
         image_url: str,
         upscale_factor: int = 2,
         model: str = "fal-ai/topaz/upscale/image",
+        topaz_model: str = "Standard V2",
+        face_enhancement: bool = True,
+        output_format: str = "jpeg",
     ) -> dict:
-        """Upscale an existing image (defaults to Topaz). `upscale_factor` is 2 or 4."""
+        """Upscale an existing image with Topaz.
+
+        - `upscale_factor`: 1–4 (2 or 4 are the most useful).
+        - `topaz_model`: one of `"Low Resolution V2"`, `"Standard V2"`,
+          `"High Fidelity V2"`, `"Text Refine"`, `"CGI"`. Defaults to
+          `"Standard V2"`. Note: this is the Topaz **preset**, distinct
+          from the fal app id passed in `model`.
+        - `face_enhancement`: enable Topaz's face refinement pass.
+        - `output_format`: `"jpeg"` or `"png"`.
+        """
         client = _client()
         try:
             payload = {
                 "model": model,
                 "imageUrl": image_url,
                 "upscale_factor": upscale_factor,
+                "topazModel": topaz_model,
+                "face_enhancement": face_enhancement,
+                "output_format": output_format,
                 "prompt": "",  # required by route shape; ignored by upscale handlers
             }
             return await client.generate_image(payload)
