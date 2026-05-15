@@ -58,6 +58,26 @@ def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
 
+def _upload_required(asset_kind: str, param_name: str) -> dict[str, Any]:
+    """Return a structured "please upload" response when the caller has no
+    public URL for an image/video. Claude can render `uploadUrl` as a link.
+    """
+    base = get_settings().wmstudio_api_url.rstrip("/")
+    upload_url = f"{base}/dashboard/creative-studio"
+    return {
+        "ok": False,
+        "error": "asset_url_required",
+        "param": param_name,
+        "assetKind": asset_kind,
+        "uploadUrl": upload_url,
+        "message": (
+            f"This tool needs a publicly accessible {asset_kind} URL via `{param_name}`. "
+            f"If your file is local, upload it at {upload_url} and copy the resulting "
+            f"URL into `{param_name}` to retry."
+        ),
+    }
+
+
 def register(mcp: FastMCP) -> None:
     # ---------- Image generation ----------
 
@@ -94,7 +114,7 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="studio_upscale_image")
     async def studio_upscale_image(
-        image_url: str,
+        image_url: str | None = None,
         upscale_factor: int = 2,
         model: str = "fal-ai/topaz/upscale/image",
         topaz_model: str = "Standard V2",
@@ -110,7 +130,12 @@ def register(mcp: FastMCP) -> None:
           from the fal app id passed in `model`.
         - `face_enhancement`: enable Topaz's face refinement pass.
         - `output_format`: `"jpeg"` or `"png"`.
+
+        If `image_url` is missing, returns a structured response with an
+        `uploadUrl` pointing the user to wmstudio so they can upload locally.
         """
+        if not image_url:
+            return _upload_required("image", "image_url")
         client = _client()
         try:
             payload = {
@@ -274,14 +299,17 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="studio_convert_to_3d")
     async def studio_convert_to_3d(
-        image_url: str,
+        image_url: str | None = None,
         model: str = "fal-ai/hunyuan3d/v2",
     ) -> dict:
         """Convert a 2D image into a 3D GLB model (Hunyuan3D v2 by default).
 
         Returns `{ is3D: true, modelGlbUrl, thumbnailUrl, modelUrls, textureUrls }`
-        on success. `image_url` should be a publicly accessible PNG/JPG.
+        on success. `image_url` should be a publicly accessible PNG/JPG; if
+        missing, the response includes an `uploadUrl` you can hand to the user.
         """
+        if not image_url:
+            return _upload_required("image", "image_url")
         client = _client()
         try:
             payload = {
@@ -324,12 +352,18 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="studio_video_enhance")
     async def studio_video_enhance(
-        video_url: str,
+        video_url: str | None = None,
         upscale_factor: int = 2,
         target_fps: int | None = None,
         model: str = "fal-ai/topaz/upscale/video",
     ) -> dict:
-        """Upscale and optionally re-time a video via Topaz Video AI."""
+        """Upscale and optionally re-time a video via Topaz Video AI.
+
+        If `video_url` is missing, returns a structured `uploadUrl` response so
+        the user can upload a local clip via the wmstudio dashboard.
+        """
+        if not video_url:
+            return _upload_required("video", "video_url")
         client = _client()
         try:
             payload = _drop_none({
