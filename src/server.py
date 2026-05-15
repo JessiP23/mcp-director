@@ -14,7 +14,7 @@ from src.auth import build_oauth_router, validate_mcp_token
 from src.config import get_settings
 from src.middleware.auth_guard import AuthGuardMiddleware
 from src.resources.templates import register_resources
-from src.tools import assets, creative, insights, pipeline
+from src.tools import assets, creative, insights, pipeline, studio
 
 log = structlog.get_logger(__name__)
 
@@ -46,6 +46,7 @@ pipeline.register(mcp)
 creative.register(mcp)
 assets.register(mcp)
 insights.register(mcp)
+studio.register(mcp)
 register_resources(mcp)
 
 mcp_app = mcp.http_app(

@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     )
 
     director_base_url: str = Field(default="http://127.0.0.1:9420", alias="DIRECTOR_BASE_URL")
+    # WM Studio (Next.js app) base URL. The studio_* tools forward to /api/creative-studio/*
+    # and /api/jobs/* using the upstream Supabase access token retrieved at OAuth exchange.
+    wmstudio_api_url: str = Field(default="http://localhost:3000", alias="WMSTUDIO_API_URL")
     # Optional: Supabase / WM Studio access JWT for director-cut API. Only applied when
     # `ENVIRONMENT=development` (e.g. smoke tests with create_test_token). OAuth clients
     # use the Supabase token stored in Redis at token exchange instead.
