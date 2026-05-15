@@ -58,7 +58,7 @@ def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
 
-def _upload_required(asset_kind: str, param_name: str) -> dict[str, Any]:
+def _upload_required(asset_kind: str, param_name: str, reason: str = "missing") -> dict[str, Any]:
     """Return a structured "please upload" response when the caller has no
     public URL for an image/video. Claude can render `uploadUrl` as a link.
 
@@ -68,18 +68,87 @@ def _upload_required(asset_kind: str, param_name: str) -> dict[str, Any]:
     via the `ASSET_UPLOAD_URL` env var.
     """
     upload_url = get_settings().asset_upload_url
+    if reason == "unreachable":
+        msg = (
+            f"The {asset_kind} URL provided is not reachable (404 or DNS failure). "
+            f"DO NOT invent or guess another URL. Ask the user to drag-and-drop "
+            f"their {asset_kind} at {upload_url} and paste the URL the page returns."
+        )
+    else:
+        msg = (
+            f"This tool needs a publicly accessible {asset_kind} URL via `{param_name}`. "
+            f"DO NOT fabricate a URL. If the user has not provided one, send them to "
+            f"{upload_url} to drag-and-drop the file — the page returns a real CDN URL."
+        )
     return {
         "ok": False,
         "error": "asset_url_required",
         "param": param_name,
         "assetKind": asset_kind,
+        "reason": reason,
         "uploadUrl": upload_url,
-        "message": (
-            f"This tool needs a publicly accessible {asset_kind} URL via `{param_name}`. "
-            f"If your file is local, drag-and-drop it at {upload_url} — the page returns "
-            f"a public CDN URL you can paste into `{param_name}` to retry."
-        ),
+        "message": msg,
     }
+
+
+# Public/CDN hosts we know are real and skip the preflight check for.
+_TRUSTED_ASSET_HOSTS = (
+    "fal.media",
+    "fal.run",
+    "cdn.wmstudio",
+    "wmstudio.io",
+    "director-cut.fly.dev",
+    "supabase.co",
+)
+
+
+async def _gate_asset_url(
+    url: str | None,
+    *,
+    asset_kind: str,
+    param: str,
+    required: bool,
+) -> dict[str, Any] | None:
+    """Single gate every studio tool uses for asset URLs.
+
+    - If `required` and url is missing → return upload-required response.
+    - If url is present but unreachable → return upload-required (reason=unreachable).
+    - If url is missing but optional (text-to-X workflows) → return None (proceed).
+
+    Returning a dict means the tool should short-circuit and return it as-is.
+    """
+    if not url:
+        if required:
+            return _upload_required(asset_kind, param)
+        return None
+    if not await _verify_asset_url(url):
+        return _upload_required(asset_kind, param, reason="unreachable")
+    return None
+
+
+async def _verify_asset_url(url: str) -> bool:
+    """Quick HEAD probe so we reject fabricated URLs before billing the user.
+
+    Returns True on 2xx/3xx, False on 4xx/5xx/DNS/timeout. Trusted hosts
+    short-circuit to True (we know the CDN serves them).
+    """
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(url).hostname or "").lower()
+        if any(host.endswith(t) for t in _TRUSTED_ASSET_HOSTS):
+            return True
+        import httpx
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=3.0), follow_redirects=True
+        ) as client:
+            r = await client.head(url)
+            if r.status_code == 405:  # HEAD not allowed; fall through to GET range
+                r = await client.get(url, headers={"Range": "bytes=0-0"})
+            return r.status_code < 400
+    except Exception:  # noqa: BLE001 — any failure means "don't trust it"
+        return False
 
 
 def register(mcp: FastMCP) -> None:
@@ -100,7 +169,13 @@ def register(mcp: FastMCP) -> None:
         Defaults to flux/dev. Pass `image_url` for img2img variants.
         Returns `{ imageUrl, images, generationId, requestId, creditsCharged }`
         on sync completion, or `{ jobId, status }` if the request is queued.
+
+        If `image_url` is provided it MUST be a real URL the user gave you;
+        never fabricate one. Omitting it falls back to pure text-to-image.
         """
+        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=False)
+        if gate:
+            return gate
         client = _client()
         try:
             payload = _drop_none({
@@ -135,11 +210,14 @@ def register(mcp: FastMCP) -> None:
         - `face_enhancement`: enable Topaz's face refinement pass.
         - `output_format`: `"jpeg"` or `"png"`.
 
-        If `image_url` is missing, returns a structured response with an
-        `uploadUrl` pointing the user to wmstudio so they can upload locally.
+        IMPORTANT: `image_url` MUST be a real URL the user gave you. NEVER
+        invent, guess, or construct a URL (no fake S3, no placeholders). If
+        the user has not provided a URL, call this tool with `image_url`
+        omitted to receive a public upload link to give them.
         """
-        if not image_url:
-            return _upload_required("image", "image_url")
+        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=True)
+        if gate:
+            return gate
         client = _client()
         try:
             payload = {
@@ -168,7 +246,14 @@ def register(mcp: FastMCP) -> None:
         `camera` is a free-form descriptor (e.g. "low angle", "dutch tilt",
         "over-the-shoulder"). The WM Studio prompt-engineer composes the
         final prompt downstream.
+
+        IMPORTANT: This tool conditions on a reference image. `image_url`
+        MUST be a real URL. If the user hasn't provided one, omit it to
+        receive the upload link to share with them — NEVER fabricate URLs.
         """
+        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=True)
+        if gate:
+            return gate
         client = _client()
         try:
             payload = _drop_none({
@@ -190,8 +275,19 @@ def register(mcp: FastMCP) -> None:
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
     ) -> dict:
-        """Brand-consistent product/marketing shot. Pass the product image and
-        an optional brand color palette (hex strings)."""
+        """Brand-consistent product/marketing shot.
+
+        Pass the product image and an optional brand color palette (hex
+        strings). IMPORTANT: `product_image_url` MUST be a real URL the
+        user gave you. NEVER fabricate URLs — if the user has not provided
+        one, omit `product_image_url` to receive the upload link to give
+        them.
+        """
+        gate = await _gate_asset_url(
+            product_image_url, asset_kind="image", param="product_image_url", required=True
+        )
+        if gate:
+            return gate
         client = _client()
         try:
             metadata: dict[str, Any] = {"toolId": "brandshot"}
@@ -279,12 +375,20 @@ def register(mcp: FastMCP) -> None:
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
     ) -> dict:
-        """UGC-style room scene with optional product placement.
+        """UGC-style room scene with product placement.
 
         `room_style` is a free-form descriptor (e.g. "minimalist bedroom",
         "cluttered college dorm"). WM Studio's UGC compose-prompt route
         refines the final prompt downstream.
+
+        IMPORTANT: `product_image_url` MUST be a real URL the user gave you.
+        NEVER fabricate URLs — omit it to receive the upload link.
         """
+        gate = await _gate_asset_url(
+            product_image_url, asset_kind="image", param="product_image_url", required=True
+        )
+        if gate:
+            return gate
         client = _client()
         try:
             metadata: dict[str, Any] = {"toolId": "ugc_room"}
@@ -304,16 +408,21 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="studio_convert_to_3d")
     async def studio_convert_to_3d(
         image_url: str | None = None,
-        model: str = "fal-ai/hunyuan3d/v2",
+        model: str = "fal-ai/meshy/v6/image-to-3d",
     ) -> dict:
-        """Convert a 2D image into a 3D GLB model (Hunyuan3D v2 by default).
+        """Convert a 2D image into a 3D GLB model (Meshy v6 by default).
 
         Returns `{ is3D: true, modelGlbUrl, thumbnailUrl, modelUrls, textureUrls }`
-        on success. `image_url` should be a publicly accessible PNG/JPG; if
-        missing, the response includes an `uploadUrl` you can hand to the user.
+        on success. Meshy v6 is the only 3D model wmstudio currently has a
+        dedicated handler for — other fal 3D endpoints will fail validation.
+
+        IMPORTANT: `image_url` MUST be a real URL the user gave you. NEVER
+        fabricate URLs. If the user has not provided one, omit `image_url`
+        to receive a public upload link to share with them.
         """
-        if not image_url:
-            return _upload_required("image", "image_url")
+        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=True)
+        if gate:
+            return gate
         client = _client()
         try:
             payload = {
@@ -340,7 +449,13 @@ def register(mcp: FastMCP) -> None:
 
         Pass `image_url` to enable image-to-video on supported models.
         `duration` is seconds (model-dependent, typically 5–10).
+
+        If `image_url` is provided it MUST be a real URL the user gave you;
+        never fabricate one. Omitting it falls back to pure text-to-video.
         """
+        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=False)
+        if gate:
+            return gate
         client = _client()
         try:
             payload = _drop_none({
@@ -363,11 +478,13 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Upscale and optionally re-time a video via Topaz Video AI.
 
-        If `video_url` is missing, returns a structured `uploadUrl` response so
-        the user can upload a local clip via the wmstudio dashboard.
+        IMPORTANT: `video_url` MUST be a real URL the user gave you. NEVER
+        fabricate URLs. If the user has not provided one, omit `video_url`
+        to receive a public upload link to share with them.
         """
-        if not video_url:
-            return _upload_required("video", "video_url")
+        gate = await _gate_asset_url(video_url, asset_kind="video", param="video_url", required=True)
+        if gate:
+            return gate
         client = _client()
         try:
             payload = _drop_none({

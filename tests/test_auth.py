@@ -349,7 +349,12 @@ async def test_token_valid_stores_supabase_upstream_in_redis():
     at = body["access_token"]
     key = mcp_upstream_token_key(at)
     stored = await fake.get(key)
-    assert stored == "supa-jwt-xyz"
+    # New storage shape: JSON `{access, refresh, exp}` to enable transparent
+    # refresh of expired Supabase access tokens. Plain access token is nested.
+    parsed = json.loads(stored)
+    assert parsed["access"] == "supa-jwt-xyz"
+    assert "refresh" in parsed
+    assert parsed["exp"] > 0
     await fake.aclose()
 
 

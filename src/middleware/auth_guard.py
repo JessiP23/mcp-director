@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import mcp.types as mt
@@ -13,10 +14,21 @@ from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import ToolResult
 
-from src.auth import mcp_upstream_token_key, validate_mcp_token
+import json
+
+from src.auth import (
+    _parse_upstream_entry,
+    mcp_upstream_token_key,
+    refresh_upstream_supabase_token,
+    validate_mcp_token,
+)
 from src.client import _normalize_director_bearer_token
 from src.config import get_settings
 from src.rate_limiter import RateLimiter
+
+# Refresh proactively when the upstream Supabase access token has < 2 minutes
+# of life left. Tools may run for tens of seconds; this avoids in-flight expiry.
+_UPSTREAM_REFRESH_SKEW_SECONDS = 120
 
 
 def _redis_from_app_state(request: Any) -> Redis | None:
@@ -67,12 +79,32 @@ class AuthGuardMiddleware(Middleware):
         request.state.scopes = claims["scopes"]
         request.state.bearer_token = token
 
+        settings = get_settings()
         upstream: str | None = None
         if redis:
-            raw = await redis.get(mcp_upstream_token_key(token))
-            if raw:
-                upstream = _normalize_director_bearer_token(str(raw))
-        settings = get_settings()
+            upstream_key = mcp_upstream_token_key(token)
+            raw = await redis.get(upstream_key)
+            entry = _parse_upstream_entry(raw)
+            if entry:
+                now = int(time.time())
+                exp = entry.get("exp") or 0
+                # Refresh proactively if access token is near expiry AND we have a
+                # refresh token. Legacy entries (exp=0) without refresh are used as-is.
+                needs_refresh = (
+                    exp > 0
+                    and exp - now < _UPSTREAM_REFRESH_SKEW_SECONDS
+                    and bool(entry.get("refresh"))
+                )
+                if needs_refresh:
+                    refreshed = await refresh_upstream_supabase_token(
+                        entry["refresh"], settings
+                    )
+                    if refreshed:
+                        entry = refreshed
+                        # Persist the rotated pair so the next request reuses it.
+                        # Keep ~24h TTL — same horizon as the OAuth token endpoint.
+                        await redis.setex(upstream_key, 86400, json.dumps(entry))
+                upstream = _normalize_director_bearer_token(entry["access"])
         if (
             not upstream
             and settings.environment == "development"

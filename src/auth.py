@@ -24,6 +24,9 @@ log = structlog.get_logger(__name__)
 CODE_TTL = 600
 PKCE_PENDING_TTL = 1800  # 30min — covers slow IdP sign-in + 2FA without breaking the flow.
 CLIENT_TTL = 86400 * 365
+# Long-lived refresh token: 90 days. Lets the connector silently mint new MCP
+# access tokens without prompting the user to re-sign in. Rotated on every use.
+MCP_REFRESH_TTL = 86400 * 90
 
 # Supabase GoTrue: min code_verifier length per RFC 7636 (auth enforces similar bounds).
 _SUPABASE_VERIFIER_NUM_BYTES = 32
@@ -68,6 +71,75 @@ def _supabase_pkce_pair() -> tuple[str, str]:
 def mcp_upstream_token_key(mcp_access_token: str) -> str:
     """Redis key for the director-cut (Supabase) bearer paired with an MCP access token."""
     return f"mcp:upstream:{_token_hash(mcp_access_token)}"
+
+
+def _parse_upstream_entry(raw: str | bytes | None) -> dict[str, Any] | None:
+    """Parse the Redis value at `mcp:upstream:<hash>`.
+
+    Accepts both the new JSON shape `{access, refresh, exp}` and the legacy
+    plain-string shape (just the access token) for backward compatibility
+    with already-cached sessions.
+    """
+    if not raw:
+        return None
+    text = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+    text = text.strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict) and data.get("access"):
+                return {
+                    "access": str(data["access"]),
+                    "refresh": str(data.get("refresh") or ""),
+                    "exp": int(data.get("exp") or 0),
+                }
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return None
+        return None
+    # Legacy: bare access token string with unknown expiry.
+    return {"access": text, "refresh": "", "exp": 0}
+
+
+async def refresh_upstream_supabase_token(
+    refresh_token: str,
+    settings: Settings,
+) -> dict[str, Any] | None:
+    """Exchange a Supabase refresh token for a fresh access/refresh pair.
+
+    Returns `{access, refresh, exp}` on success, or None on failure (caller
+    should fall through to a 401 so the client re-authenticates).
+    """
+    if not refresh_token:
+        return None
+    url = f"{settings.supabase_url.rstrip('/')}/auth/v1/token?grant_type=refresh_token"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            url,
+            headers={
+                "apikey": settings.supabase_anon_key,
+                "Content-Type": "application/json",
+            },
+            json={"refresh_token": refresh_token},
+        )
+    if resp.status_code >= 400:
+        log.warning(
+            "supabase_refresh_failed",
+            status=resp.status_code,
+            body_snippet=(resp.text or "")[:200],
+        )
+        return None
+    body = resp.json()
+    access = body.get("access_token")
+    if not access:
+        return None
+    ttl = int(body.get("expires_in") or 3600)
+    return {
+        "access": str(access),
+        "refresh": str(body.get("refresh_token") or refresh_token),
+        "exp": int(time.time()) + ttl,
+    }
 
 def create_mcp_access_token(
     *,
@@ -201,7 +273,7 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
                 "token_endpoint": f"{base}/oauth/token",
                 "registration_endpoint": f"{base}/oauth/register",
                 "response_types_supported": ["code"],
-                "grant_types_supported": ["authorization_code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
                 "code_challenge_methods_supported": ["S256"],
                 "token_endpoint_auth_methods_supported": ["none"],
                 "scopes_supported": [
@@ -286,6 +358,8 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             raise HTTPException(status_code=401, detail="supabase code exchange failed")
         body = resp.json()
         access = body.get("access_token")
+        refresh = body.get("refresh_token")
+        access_ttl = int(body.get("expires_in") or 3600)
         if not access:
             raise HTTPException(status_code=401, detail="no access token from supabase")
 
@@ -305,6 +379,8 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
             "client_id": pending["client_id"],
             "scopes": ["pipeline:read", "pipeline:write", "assets:read"],
             "supabase_access": access,
+            "supabase_refresh": refresh or "",
+            "supabase_access_ttl": access_ttl,
         }
         await redis.setex(
             f"oauth:code:{director_code}",
@@ -395,78 +471,161 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
         """Legacy path; prefer /oauth/idp-callback in Supabase redirect allowlists."""
         return await _oauth_supabase_return(request)
 
+    async def _issue_token_pair(
+        *,
+        redis: Redis,
+        settings: Settings,
+        user_id: str,
+        scopes: list[str],
+        client_id: str | None,
+        supabase_access: str,
+        supabase_refresh: str,
+        supabase_access_ttl: int,
+        req_id: str,
+    ) -> dict[str, Any]:
+        """Mint MCP access+refresh tokens and persist their upstream Supabase pair.
+
+        Used by both the `authorization_code` and `refresh_token` grants so the
+        wire response and Redis state are byte-identical.
+        """
+        access_token, expires_in = create_mcp_access_token(
+            settings=settings,
+            user_id=user_id,
+            scopes=scopes,
+            client_id=client_id,
+        )
+        th = _token_hash(access_token)
+        await redis.setex(f"oauth:token:active:{th}", expires_in + 60, user_id)
+
+        if supabase_access:
+            entry = {
+                "access": supabase_access,
+                "refresh": supabase_refresh or "",
+                "exp": int(time.time()) + max(int(supabase_access_ttl or 3600), 60),
+            }
+            await redis.setex(
+                mcp_upstream_token_key(access_token),
+                max(expires_in + 120, 86400),
+                json.dumps(entry),
+            )
+
+        # Mint an opaque refresh token; persist a server-side record holding
+        # everything we need to mint another access token + upstream pair later.
+        refresh_token = secrets.token_urlsafe(48)
+        refresh_record = {
+            "user_id": user_id,
+            "scopes": scopes,
+            "client_id": client_id or "",
+            "supabase_refresh": supabase_refresh or "",
+        }
+        await redis.setex(
+            f"oauth:refresh:{_token_hash(refresh_token)}",
+            MCP_REFRESH_TTL,
+            json.dumps(refresh_record),
+        )
+
+        log.info(
+            "oauth_token_issued",
+            http_request_id=req_id,
+            mcp_token_sha256_prefix=_opaque_prefix(access_token),
+        )
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": expires_in,
+            "refresh_token": refresh_token,
+            "scope": " ".join(scopes),
+        }
+
     @router.post("/oauth/token")
     async def oauth_token(request: Request):
         settings = get_settings()
         _ensure_https_production(request, settings)
         req_id = _http_request_id(request)
         form = await request.form()
-        grant_type = form.get("grant_type")
-        if grant_type != "authorization_code":
-            raise HTTPException(status_code=400, detail="unsupported grant_type")
-        code_verifier = str(form.get("code_verifier") or "")
-        code = str(form.get("code") or "")
-        if not code_verifier or not code:
-            raise HTTPException(status_code=400, detail="missing code or code_verifier")
-
+        grant_type = str(form.get("grant_type") or "")
         redis = await redis_client()
-        raw = await redis.get(f"oauth:code:{code}")
-        if not raw:
-            log.warning(
-                "oauth_token_code_miss",
-                http_request_id=req_id,
-                code_sha256_prefix=_opaque_prefix(code),
-            )
-            raise HTTPException(status_code=401, detail="invalid code")
-        payload = json.loads(raw)
-        if not verify_pkce(code_verifier, payload["code_challenge"]):
-            log.warning(
-                "oauth_token_pkce_failed",
-                http_request_id=req_id,
-                code_sha256_prefix=_opaque_prefix(code),
-            )
-            raise HTTPException(status_code=401, detail="invalid code_verifier")
 
-        await redis.delete(f"oauth:code:{code}")
+        if grant_type == "authorization_code":
+            code_verifier = str(form.get("code_verifier") or "")
+            code = str(form.get("code") or "")
+            if not code_verifier or not code:
+                raise HTTPException(status_code=400, detail="missing code or code_verifier")
 
-        access_token, expires_in = create_mcp_access_token(
-            settings=settings,
-            user_id=payload["user_id"],
-            scopes=list(payload.get("scopes", [])),
-            client_id=payload.get("client_id"),
-        )
-        th = _token_hash(access_token)
-        await redis.setex(
-            f"oauth:token:active:{th}",
-            expires_in + 60,
-            payload["user_id"],
-        )
-        upstream = payload.get("supabase_access")
-        if upstream:
-            await redis.setex(
-                mcp_upstream_token_key(access_token),
-                expires_in + 120,
-                upstream,
+            raw = await redis.get(f"oauth:code:{code}")
+            if not raw:
+                log.warning(
+                    "oauth_token_code_miss",
+                    http_request_id=req_id,
+                    code_sha256_prefix=_opaque_prefix(code),
+                )
+                raise HTTPException(status_code=401, detail="invalid code")
+            payload = json.loads(raw)
+            if not verify_pkce(code_verifier, payload["code_challenge"]):
+                log.warning(
+                    "oauth_token_pkce_failed",
+                    http_request_id=req_id,
+                    code_sha256_prefix=_opaque_prefix(code),
+                )
+                raise HTTPException(status_code=401, detail="invalid code_verifier")
+
+            await redis.delete(f"oauth:code:{code}")
+            body_payload = await _issue_token_pair(
+                redis=redis,
+                settings=settings,
+                user_id=payload["user_id"],
+                scopes=list(payload.get("scopes", [])),
+                client_id=payload.get("client_id"),
+                supabase_access=payload.get("supabase_access") or "",
+                supabase_refresh=payload.get("supabase_refresh") or "",
+                supabase_access_ttl=int(payload.get("supabase_access_ttl") or 3600),
+                req_id=req_id,
             )
-        scope_str = " ".join(payload.get("scopes", []))
-        log.info(
-            "oauth_token_issued",
-            http_request_id=req_id,
-            mcp_token_sha256_prefix=_opaque_prefix(access_token),
-        )
+        elif grant_type == "refresh_token":
+            presented = str(form.get("refresh_token") or "")
+            if not presented:
+                raise HTTPException(status_code=400, detail="missing refresh_token")
+            rt_key = f"oauth:refresh:{_token_hash(presented)}"
+            raw = await redis.get(rt_key)
+            if not raw:
+                log.warning("oauth_refresh_unknown", http_request_id=req_id)
+                raise HTTPException(status_code=401, detail="invalid refresh_token")
+            record = json.loads(raw)
+            # Rotate: the presented refresh token is single-use. Delete now so a
+            # leaked copy can't mint a second pair (RFC 6749 §10.4 recommendation).
+            await redis.delete(rt_key)
+
+            # Refresh the upstream Supabase access token using its long-lived
+            # refresh token. If Supabase refuses (e.g. user revoked access),
+            # surface 401 so the client redoes the full OAuth dance.
+            supa_refresh = record.get("supabase_refresh") or ""
+            refreshed = await refresh_upstream_supabase_token(supa_refresh, settings)
+            if not refreshed:
+                log.warning(
+                    "oauth_refresh_supabase_failed",
+                    http_request_id=req_id,
+                    user_id=record.get("user_id"),
+                )
+                raise HTTPException(status_code=401, detail="upstream session expired")
+
+            body_payload = await _issue_token_pair(
+                redis=redis,
+                settings=settings,
+                user_id=record["user_id"],
+                scopes=list(record.get("scopes", [])),
+                client_id=record.get("client_id") or None,
+                supabase_access=refreshed["access"],
+                supabase_refresh=refreshed["refresh"],
+                supabase_access_ttl=max(int(refreshed["exp"]) - int(time.time()), 60),
+                req_id=req_id,
+            )
+        else:
+            raise HTTPException(status_code=400, detail="unsupported grant_type")
+
         # OAuth 2.1 §3.1.5: token endpoint responses MUST set Cache-Control: no-store.
-        # Some clients (incl. Claude.ai) treat cached/replayed token responses as failures.
         return JSONResponse(
-            {
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": expires_in,
-                "scope": scope_str,
-            },
-            headers={
-                "Cache-Control": "no-store",
-                "Pragma": "no-cache",
-            },
+            body_payload,
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
         )
 
     @router.post("/oauth/register")
