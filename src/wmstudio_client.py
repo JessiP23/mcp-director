@@ -148,6 +148,29 @@ class WMStudioClient:
         resp = await self._request("GET", "/api/credits/balance")
         return self._parse(resp, "credits_balance")
 
+    async def estimate_pricing(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Get a credit-cost estimate for a generation BEFORE running it.
+
+        `payload` must include `model` plus any model-specific knobs that
+        affect price (`duration`, `resolution`, `num_images`, `aspect_ratio`,
+        ...). Returns `{ credits, costUSD, costEUR }`.
+        """
+        resp = await self._request("POST", "/api/creative-studio/pricing", json=payload)
+        return self._parse(resp, "estimate_pricing")
+
+    async def web_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run a Tavily-powered web search via the WM Studio backend.
+
+        `payload`: `{ query, maxResults?, searchDepth?, timeRange?,
+                      includeDomains?, excludeDomains? }`.
+
+        Returns `{ v: 1, answer, results, images, followUpQuestions,
+        creditsCharged, creditsRemaining }`. Charges 1 credit (basic) or
+        2 credits (advanced). Failed searches do not charge.
+        """
+        resp = await self._request("POST", "/api/me/tools/web-search", json=payload)
+        return self._parse(resp, "web_search")
+
 
 def get_user_wmstudio_client(ctx_request_state: Any, base_url: str) -> WMStudioClient:
     """Build a per-request WMStudioClient from the upstream Supabase token.

@@ -167,6 +167,40 @@ Use WM Studio MCP to generate a launch thumbnail image for my product.
 
 - `director_insight_run_cost` / `director_insight_pipeline_analytics` / `director_insight_model_recommendations`  
 
+### Studio (creative) — `studio_*`
+
+Direct access to WM Studio's creative-studio endpoints (single-asset image/video, web search, credits).
+
+- `studio_generate_image` — text-to-image / image-to-image. Default model: `fal-ai/nano-banana-pro` (auto-switches to `fal-ai/nano-banana-pro/edit` when an `image_url` is passed).
+- `studio_generate_video` — text-to-video / image-to-video. Default model: `bytedance/seedance-2.0-fast`.
+- `studio_upscale_image` / `studio_video_enhance` — Topaz upscaling.
+- `studio_camera_angles` / `studio_brandshot` / `studio_casting` / `studio_digital_twin` / `studio_ugc_room` — preset image flows.
+- `studio_convert_to_3d` — image → GLB.
+- `studio_web_search` — Tavily-powered web search. 1 credit (basic) or 2 (advanced); charged only on success.
+- `studio_job_status` / `studio_credits_balance` — lifecycle.
+
+#### Two-phase cost confirmation (REQUIRED for `studio_generate_image` / `studio_generate_video`)
+
+Generation tools refuse to spend credits on the first call. The flow is:
+
+1. Agent calls `studio_generate_image(prompt=..., ...)` **without** `confirm`.  
+   Tool returns:
+   ```json
+   {
+     "ok": true,
+     "preview": true,
+     "requiresConfirmation": true,
+     "operation": "image generation · fal-ai/nano-banana-pro",
+     "estimatedCredits": 18,
+     "estimatedCostUsd": 0.30,
+     "message": "You are going to spend ~18 credits (~$0.300) for `image generation · fal-ai/nano-banana-pro`. Confirm with the user before proceeding..."
+   }
+   ```
+2. Agent shows that to the user and asks "Proceed?".
+3. If the user accepts, agent re-calls the **same tool** with `confirm=True` to actually generate.
+
+This guarantees the user sees the cost and explicitly opts in for every paid generation.
+
 ## Deploy (Fly.io)
 
 ```bash

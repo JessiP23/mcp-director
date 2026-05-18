@@ -166,6 +166,71 @@ async def _attach_credit_status(client: WMStudioClient, result: dict[str, Any]) 
     return result
 
 
+async def _preview_or_run(
+    client: WMStudioClient,
+    op,  # type: ignore[no-untyped-def] — bound coroutine method
+    payload: dict[str, Any],
+    *,
+    confirm: bool,
+    operation_label: str,
+) -> dict[str, Any]:
+    """Two-phase confirmation pattern for billed operations.
+
+    When `confirm=False` (default): fetch a cost estimate from the wmstudio
+    pricing endpoint and return a structured `preview` response. The agent
+    is expected to surface the credit cost to the user and re-call with
+    `confirm=True`.
+
+    When `confirm=True`: run the actual billed operation via `_run_billed`.
+
+    The preview includes `requiresConfirmation: True` and a `message` the
+    agent can read aloud verbatim.
+    """
+    if confirm:
+        return await _run_billed(client, op, payload)
+
+    try:
+        estimate = await client.estimate_pricing(payload)
+    except WMStudioClientError as e:
+        log.warning(
+            "preview_pricing_failed",
+            operation=operation_label,
+            status=e.status_code,
+            message=str(e.message)[:200],
+        )
+        # No estimate — still ask for confirmation but without a number.
+        return {
+            "ok": True,
+            "preview": True,
+            "requiresConfirmation": True,
+            "operation": operation_label,
+            "estimatedCredits": None,
+            "estimatedCostUsd": None,
+            "message": (
+                f"You're about to run `{operation_label}`. The cost estimate is "
+                f"unavailable right now. Ask the user to confirm, then re-call this "
+                f"tool with `confirm=True` to proceed."
+            ),
+        }
+
+    credits = estimate.get("credits")
+    cost_usd = estimate.get("costUSD")
+    return {
+        "ok": True,
+        "preview": True,
+        "requiresConfirmation": True,
+        "operation": operation_label,
+        "estimatedCredits": credits,
+        "estimatedCostUsd": cost_usd,
+        "message": (
+            f"You are going to spend ~{credits} credits"
+            + (f" (~${cost_usd:.3f})" if isinstance(cost_usd, (int, float)) else "")
+            + f" for `{operation_label}`. Confirm with the user before proceeding. "
+            f"If they accept, re-call this exact tool with `confirm=True`."
+        ),
+    }
+
+
 async def _run_billed(
     client: WMStudioClient,
     op,  # type: ignore[no-untyped-def] — bound coroutine method
@@ -246,7 +311,8 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="studio_generate_image")
     async def studio_generate_image(
         prompt: str,
-        model: str = "fal-ai/flux/dev",
+        confirm: bool = False,
+        model: str | None = None,
         aspect_ratio: str | None = None,
         image_url: str | None = None,
         negative_prompt: str | None = None,
@@ -255,28 +321,49 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Generate an image with WM Studio via fal.ai.
 
-        Defaults to flux/dev. Pass `image_url` for img2img variants.
-        Returns `{ imageUrl, images, generationId, requestId, creditsCharged }`
-        on sync completion, or `{ jobId, status }` if the request is queued.
+        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
+          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
+             `preview` with `estimatedCredits`. Show that cost to the user
+             verbatim and ASK: "You are going to spend X credits. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the image. NEVER set `confirm=True` on your
+             own initiative.
+
+        Defaults to `fal-ai/nano-banana-pro` (text-to-image), auto-switching
+        to `fal-ai/nano-banana-pro/edit` when `image_url` is provided.
+        Returns `{ imageUrl, images, generationId, requestId, creditsCharged,
+        creditsRemaining }` on success.
 
         If `image_url` is provided it MUST be a real URL the user gave you;
-        never fabricate one. Omitting it falls back to pure text-to-image.
+        never fabricate one.
         """
         gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=False)
         if gate:
             return gate
+
+        # Default model: edit variant for img2img, base variant for t2i.
+        resolved_model = model or (
+            "fal-ai/nano-banana-pro/edit" if image_url else "fal-ai/nano-banana-pro"
+        )
+
         client = _client()
         try:
             payload = _drop_none({
                 "prompt": prompt,
-                "model": model,
+                "model": resolved_model,
                 "aspect_ratio": aspect_ratio,
                 "imageUrl": image_url,
                 "negative_prompt": negative_prompt,
                 "num_images": num_images,
                 "seed": seed,
             })
-            return await _run_billed(client, client.generate_image, payload)
+            return await _preview_or_run(
+                client,
+                client.generate_image,
+                payload,
+                confirm=confirm,
+                operation_label=f"image generation · {resolved_model}",
+            )
         finally:
             await client.aclose()
 
@@ -529,18 +616,31 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="studio_generate_video")
     async def studio_generate_video(
         prompt: str,
-        model: str = "fal-ai/kling-video/v2.5-turbo/pro/text-to-video",
+        confirm: bool = False,
+        model: str = "bytedance/seedance-2.0-fast",
         image_url: str | None = None,
         aspect_ratio: str | None = None,
         duration: int | None = None,
+        resolution: str | None = None,
     ) -> dict:
         """Generate a video (text-to-video or image-to-video).
 
-        Pass `image_url` to enable image-to-video on supported models.
+        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
+          1. Call WITHOUT `confirm` first → returns a `preview` with
+             `estimatedCredits`. Show that cost to the user verbatim and
+             ASK: "You are going to spend X credits. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the video. NEVER set `confirm=True` on your
+             own initiative.
+
+        Defaults to `bytedance/seedance-2.0-fast` (Seedance 2.0 Fast,
+        720p, ~5s). Pass `image_url` for image-to-video on supported models.
         `duration` is seconds (model-dependent, typically 5–10).
+        `resolution` is one of `480p | 720p | 1080p` (model-dependent;
+        Seedance 2.0 Fast tops out at 720p).
 
         If `image_url` is provided it MUST be a real URL the user gave you;
-        never fabricate one. Omitting it falls back to pure text-to-video.
+        never fabricate one.
         """
         gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=False)
         if gate:
@@ -553,8 +653,18 @@ def register(mcp: FastMCP) -> None:
                 "imageUrl": image_url,
                 "aspect_ratio": aspect_ratio,
                 "duration": duration,
+                "resolution": resolution,
             })
-            return await _run_billed(client, client.generate_video, payload)
+            return await _preview_or_run(
+                client,
+                client.generate_video,
+                payload,
+                confirm=confirm,
+                operation_label=(
+                    f"video generation · {model}"
+                    + (f" · {duration}s" if duration else "")
+                ),
+            )
         finally:
             await client.aclose()
 
@@ -602,6 +712,72 @@ def register(mcp: FastMCP) -> None:
         finally:
             await client.aclose()
 
+    @mcp.tool(name="studio_web_search")
+    async def studio_web_search(
+        query: str,
+        max_results: int | None = 5,
+        search_depth: str | None = "basic",
+        time_range: str | None = None,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+    ) -> dict:
+        """Search the web (Tavily-powered) via the WM Studio backend.
+
+        Costs 1 credit (basic) or 2 credits (advanced). The user is only
+        charged on success — failed searches do not deduct credits.
+
+        Returns:
+          {
+            v: 1,
+            answer: string | null,           # Tavily's direct answer when available
+            results: [{ title, url, content, score? }],
+            images: string[],
+            followUpQuestions: string[],
+            creditsCharged: number,
+            creditsRemaining: number,
+          }
+
+        Args:
+          query: search string (1–400 chars).
+          max_results: 1–10 (default 5).
+          search_depth: "basic" | "advanced" — advanced is slower but more
+                        thorough and costs 2 credits.
+          time_range: "day" | "week" | "month" | "year" to filter by recency.
+          include_domains: only return results from these domains.
+          exclude_domains: skip results from these domains.
+
+        Use this when:
+          - The user asks for current/recent information.
+          - Your training data may be stale (post-cutoff news, releases, prices).
+          - You need authoritative sources to cite back.
+        """
+        client = _client()
+        try:
+            payload = _drop_none({
+                "query": query,
+                "maxResults": max_results,
+                "searchDepth": search_depth,
+                "timeRange": time_range,
+                "includeDomains": include_domains,
+                "excludeDomains": exclude_domains,
+            })
+            return await client.web_search(payload)
+        except WMStudioClientError as e:
+            log.warning(
+                "studio_web_search_upstream_error",
+                status=e.status_code,
+                message=str(e.message)[:200],
+            )
+            return {
+                "ok": False,
+                "error": "upstream_error",
+                "status": e.status_code,
+                "message": str(e.message),
+                "details": e.payload,
+            }
+        finally:
+            await client.aclose()
+
     @mcp.tool(name="studio_credits_balance")
     async def studio_credits_balance() -> dict:
         """Return the authenticated user's credit balance.
@@ -627,6 +803,7 @@ def register(mcp: FastMCP) -> None:
         studio_generate_video,
         studio_video_enhance,
         studio_job_status,
+        studio_web_search,
         studio_credits_balance,
         _safe_call,
     )
