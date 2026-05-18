@@ -153,7 +153,7 @@ class WMStudioClient:
 
         `payload` must include `model` plus any model-specific knobs that
         affect price (`duration`, `resolution`, `num_images`, `aspect_ratio`,
-        ...). Returns `{ credits, costUSD, costEUR }`.
+        ...). Returns `{ credits }`.
         """
         resp = await self._request("POST", "/api/creative-studio/pricing", json=payload)
         return self._parse(resp, "estimate_pricing")

@@ -207,7 +207,6 @@ async def _preview_or_run(
             "requiresConfirmation": True,
             "operation": operation_label,
             "estimatedCredits": None,
-            "estimatedCostUsd": None,
             "message": (
                 f"You're about to run `{operation_label}`. The cost estimate is "
                 f"unavailable right now. Ask the user to confirm, then re-call this "
@@ -216,18 +215,15 @@ async def _preview_or_run(
         }
 
     credits = estimate.get("credits")
-    cost_usd = estimate.get("costUSD")
     return {
         "ok": True,
         "preview": True,
         "requiresConfirmation": True,
         "operation": operation_label,
         "estimatedCredits": credits,
-        "estimatedCostUsd": cost_usd,
         "message": (
             f"You are going to spend ~{credits} credits"
-            + (f" (~${cost_usd:.3f})" if isinstance(cost_usd, (int, float)) else "")
-            + f" for `{operation_label}`. Confirm with the user before proceeding. "
+            f" for `{operation_label}`. Confirm with the user before proceeding. "
             f"If they accept, re-call this exact tool with `confirm=True`."
         ),
     }
@@ -439,20 +435,50 @@ async def _verify_asset_url(url: str) -> bool:
 
 
 def register(mcp: FastMCP) -> None:
+    # ---------- Shared image-generation options (extensible) ----------
+
+    @mcp.resource("studio://options/image-aspect-ratios")
+    def image_aspect_ratios() -> dict[str, Any]:
+        """Available aspect ratios for image generation.
+
+        Agents MUST ask the user to pick one before calling any image
+        generation tool. This resource is the single source of truth —
+        add new entries here and they propagate to every tool + the CLI.
+        """
+        return {
+            "description": "Aspect ratios for image generation. Ask the user to pick one.",
+            "options": [
+                {"value": "1:1", "label": "Square (1:1)", "tags": ["social", "instagram"]},
+                {"value": "16:9", "label": "Landscape (16:9)", "tags": ["youtube", "desktop"]},
+                {"value": "9:16", "label": "Portrait (9:16)", "tags": ["stories", "mobile", "tiktok"]},
+                {"value": "4:3", "label": "Classic (4:3)", "tags": ["photography"]},
+                {"value": "3:4", "label": "Tall (3:4)", "tags": ["portrait", "print"]},
+                {"value": "21:9", "label": "Ultrawide (21:9)", "tags": ["cinematic"]},
+            ],
+            "default": "1:1",
+        }
+
     # ---------- Image generation ----------
 
     @mcp.tool(name="studio_generate_image")
     async def studio_generate_image(
         prompt: str,
+        aspect_ratio: str,
         confirm: bool = False,
         model: str | None = None,
-        aspect_ratio: str | None = None,
         image_url: str | None = None,
         negative_prompt: str | None = None,
         num_images: int | None = None,
         seed: int | None = None,
     ) -> dict:
         """Generate an image with WM Studio via fal.ai.
+
+        ASPECT RATIO (REQUIRED — ask the user before calling):
+          You MUST ask the user which aspect ratio they want BEFORE calling
+          this tool. Available options are listed in the `studio://options/
+          image-aspect-ratios` resource. Read that resource, present the
+          options to the user, and pass their choice as `aspect_ratio`.
+          Do NOT guess or pick a default on your own.
 
         TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
           1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
@@ -470,6 +496,17 @@ def register(mcp: FastMCP) -> None:
         If `image_url` is provided it MUST be a real URL the user gave you;
         never fabricate one.
         """
+        if not aspect_ratio or ":" not in aspect_ratio:
+            return {
+                "ok": False,
+                "error": "aspect_ratio_required",
+                "message": (
+                    "You must ask the user which aspect ratio they want. Read "
+                    "`studio://options/image-aspect-ratios` for the list of "
+                    "available options, present them to the user, and pass "
+                    "their choice as `aspect_ratio` (e.g. \"16:9\")."
+                ),
+            }
         gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=False)
         if gate:
             return gate
@@ -750,10 +787,10 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(name="studio_storyboard_frames")
     async def studio_storyboard_frames(
         prompt: str,
+        aspect_ratio: str,
         confirm: bool = False,
         n: int = 3,
         model: str | None = None,
-        aspect_ratio: str | None = "16:9",
         negative_prompt: str | None = None,
         seed: int | None = None,
     ) -> dict:
@@ -766,6 +803,13 @@ def register(mcp: FastMCP) -> None:
         ONE they want animated, and ONLY THEN call `studio_generate_video`
         with that chosen URL as `image_url`.
 
+        ASPECT RATIO (REQUIRED — ask the user before calling):
+          You MUST ask the user which aspect ratio they want BEFORE calling
+          this tool. Available options are listed in the `studio://options/
+          image-aspect-ratios` resource. Read that resource, present the
+          options to the user, and pass their choice as `aspect_ratio`.
+          Do NOT guess or pick a default on your own.
+
         TWO-PHASE CONFIRMATION (REQUIRED):
           1. Call WITHOUT `confirm` → returns a `preview` showing the TOTAL
              cost for all `n` frames. Show that cost to the user verbatim
@@ -774,7 +818,7 @@ def register(mcp: FastMCP) -> None:
           2. Only AFTER the user agrees, re-call with `confirm=True` to
              actually generate the frames.
 
-        Defaults: `n=3`, `aspect_ratio="16:9"`, model `fal-ai/nano-banana-pro`.
+        Defaults: `n=3`, model `fal-ai/nano-banana-pro`.
         Returns on success:
           {
             ok: true,
@@ -788,6 +832,17 @@ def register(mcp: FastMCP) -> None:
         On partial failure (some frames fail), `frames` contains only the
         successes and `partial: true` is set with a `failed` count.
         """
+        if not aspect_ratio or ":" not in aspect_ratio:
+            return {
+                "ok": False,
+                "error": "aspect_ratio_required",
+                "message": (
+                    "You must ask the user which aspect ratio they want. Read "
+                    "`studio://options/image-aspect-ratios` for the list of "
+                    "available options, present them to the user, and pass "
+                    "their choice as `aspect_ratio` (e.g. \"16:9\")."
+                ),
+            }
         if n < 1 or n > 6:
             return {
                 "ok": False,
@@ -810,12 +865,8 @@ def register(mcp: FastMCP) -> None:
                 try:
                     estimate = await client.estimate_pricing(single_payload)
                     per_credits = estimate.get("credits")
-                    per_usd = estimate.get("costUSD")
                     total_credits = (
                         per_credits * n if isinstance(per_credits, (int, float)) else None
-                    )
-                    total_usd = (
-                        per_usd * n if isinstance(per_usd, (int, float)) else None
                     )
                 except WMStudioClientError as e:
                     log.warning(
@@ -824,11 +875,9 @@ def register(mcp: FastMCP) -> None:
                         message=str(e.message)[:200],
                     )
                     total_credits = None
-                    total_usd = None
 
                 cost_blurb = (
                     f"~{total_credits} credits"
-                    + (f" (~${total_usd:.3f})" if isinstance(total_usd, (int, float)) else "")
                     if total_credits is not None
                     else "an estimated cost (pricing unavailable)"
                 )
@@ -839,7 +888,6 @@ def register(mcp: FastMCP) -> None:
                     "operation": f"storyboard · {n}× {resolved_model}",
                     "framesRequested": n,
                     "estimatedCreditsTotal": total_credits,
-                    "estimatedCostUsdTotal": total_usd,
                     "message": (
                         f"To generate {n} frame candidates I will spend {cost_blurb}. "
                         f"Confirm with the user before proceeding. If they accept, "
