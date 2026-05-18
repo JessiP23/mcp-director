@@ -13,6 +13,7 @@ the response is `{ jobId, status: "processing" }` and the caller polls via
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -611,6 +612,195 @@ def register(mcp: FastMCP) -> None:
         finally:
             await client.aclose()
 
+    # ---------- Storyboard (frame candidates for video) ----------
+
+    @mcp.tool(name="studio_storyboard_frames")
+    async def studio_storyboard_frames(
+        prompt: str,
+        confirm: bool = False,
+        n: int = 3,
+        model: str | None = None,
+        aspect_ratio: str | None = "16:9",
+        negative_prompt: str | None = None,
+        seed: int | None = None,
+    ) -> dict:
+        """Generate N image FRAME CANDIDATES for the user to choose from
+        before running a video generation.
+
+        REQUIRED FIRST STEP FOR VIDEO REQUESTS. Whenever the user asks for a
+        video, you MUST call this tool first to produce 2–4 still-frame
+        options, present every returned `imageUrl` to the user, ask which
+        ONE they want animated, and ONLY THEN call `studio_generate_video`
+        with that chosen URL as `image_url`.
+
+        TWO-PHASE CONFIRMATION (REQUIRED):
+          1. Call WITHOUT `confirm` → returns a `preview` showing the TOTAL
+             cost for all `n` frames. Show that cost to the user verbatim
+             and ask: "You are going to spend X credits to generate N frame
+             candidates. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the frames.
+
+        Defaults: `n=3`, `aspect_ratio="16:9"`, model `fal-ai/nano-banana-pro`.
+        Returns on success:
+          {
+            ok: true,
+            frames: [
+              { index: 0, imageUrl, generationId },
+              ...
+            ],
+            count, creditsCharged, creditsRemaining
+          }
+
+        On partial failure (some frames fail), `frames` contains only the
+        successes and `partial: true` is set with a `failed` count.
+        """
+        if n < 1 or n > 6:
+            return {
+                "ok": False,
+                "error": "usage",
+                "message": "`n` must be between 1 and 6 frame candidates.",
+            }
+        resolved_model = model or "fal-ai/nano-banana-pro"
+
+        client = _client()
+        try:
+            single_payload = _drop_none({
+                "prompt": prompt,
+                "model": resolved_model,
+                "aspect_ratio": aspect_ratio,
+                "negative_prompt": negative_prompt,
+            })
+
+            if not confirm:
+                # Preview: estimate one frame and multiply by n.
+                try:
+                    estimate = await client.estimate_pricing(single_payload)
+                    per_credits = estimate.get("credits")
+                    per_usd = estimate.get("costUSD")
+                    total_credits = (
+                        per_credits * n if isinstance(per_credits, (int, float)) else None
+                    )
+                    total_usd = (
+                        per_usd * n if isinstance(per_usd, (int, float)) else None
+                    )
+                except WMStudioClientError as e:
+                    log.warning(
+                        "storyboard_preview_pricing_failed",
+                        status=e.status_code,
+                        message=str(e.message)[:200],
+                    )
+                    total_credits = None
+                    total_usd = None
+
+                cost_blurb = (
+                    f"~{total_credits} credits"
+                    + (f" (~${total_usd:.3f})" if isinstance(total_usd, (int, float)) else "")
+                    if total_credits is not None
+                    else "an estimated cost (pricing unavailable)"
+                )
+                return {
+                    "ok": True,
+                    "preview": True,
+                    "requiresConfirmation": True,
+                    "operation": f"storyboard · {n}× {resolved_model}",
+                    "framesRequested": n,
+                    "estimatedCreditsTotal": total_credits,
+                    "estimatedCostUsdTotal": total_usd,
+                    "message": (
+                        f"To generate {n} frame candidates I will spend {cost_blurb}. "
+                        f"Confirm with the user before proceeding. If they accept, "
+                        f"re-call this exact tool with `confirm=True`. After you have "
+                        f"the frames, show every `imageUrl` to the user and ask which "
+                        f"ONE to animate — then call `studio_generate_video` with that "
+                        f"URL as `image_url`."
+                    ),
+                }
+
+            # Confirmed: fan out N parallel image generations.
+            async def _one(idx: int) -> dict[str, Any]:
+                payload = dict(single_payload)
+                # Seed each frame deterministically off the base seed so the
+                # user can reproduce a specific candidate later.
+                if seed is not None:
+                    payload["seed"] = int(seed) + idx
+                try:
+                    res = await client.generate_image(payload)
+                    return {"ok": True, "index": idx, "result": res}
+                except InsufficientCreditsError as e:
+                    return {"ok": False, "index": idx, "error": "insufficient_credits", "payload": e.payload}
+                except WMStudioClientError as e:
+                    log.warning(
+                        "storyboard_frame_failed",
+                        index=idx,
+                        status=e.status_code,
+                        message=str(e.message)[:200],
+                    )
+                    return {"ok": False, "index": idx, "error": str(e.message)}
+
+            outcomes = await asyncio.gather(*[_one(i) for i in range(n)])
+
+            # If the very first frame hit insufficient_credits, surface that
+            # canonically and abort the rest are likely identical.
+            first_credits_fail = next(
+                (o for o in outcomes if not o["ok"] and o.get("error") == "insufficient_credits"),
+                None,
+            )
+            if first_credits_fail and not any(o["ok"] for o in outcomes):
+                return _upgrade_required(first_credits_fail.get("payload") or {})
+
+            frames: list[dict[str, Any]] = []
+            credits_charged = 0
+            for o in outcomes:
+                if not o["ok"]:
+                    continue
+                res = o["result"]
+                image_url = (
+                    res.get("imageUrl")
+                    or (res.get("images") or [{}])[0].get("url")
+                    if isinstance(res, dict)
+                    else None
+                )
+                frames.append({
+                    "index": o["index"],
+                    "imageUrl": image_url,
+                    "generationId": res.get("generationId") if isinstance(res, dict) else None,
+                })
+                cc = res.get("creditsCharged") if isinstance(res, dict) else None
+                if isinstance(cc, (int, float)):
+                    credits_charged += int(cc)
+
+            if not frames:
+                return {
+                    "ok": False,
+                    "error": "all_frames_failed",
+                    "message": (
+                        f"All {n} frame generations failed. No credits were charged "
+                        f"for the failures."
+                    ),
+                    "failures": [o for o in outcomes if not o["ok"]],
+                }
+
+            # Pull final balance once (cheaper than reading each per-frame response).
+            response: dict[str, Any] = {
+                "ok": True,
+                "framesRequested": n,
+                "count": len(frames),
+                "frames": frames,
+                "creditsCharged": credits_charged,
+                "nextStep": (
+                    "Show every imageUrl above to the user and ask which ONE to animate. "
+                    "Then call studio_generate_video with that URL as `image_url` "
+                    "(no `confirm`) to preview the video cost."
+                ),
+            }
+            if len(frames) < n:
+                response["partial"] = True
+                response["failed"] = n - len(frames)
+            return await _attach_credit_status(client, response)
+        finally:
+            await client.aclose()
+
     # ---------- Video ----------
 
     @mcp.tool(name="studio_generate_video")
@@ -622,26 +812,55 @@ def register(mcp: FastMCP) -> None:
         aspect_ratio: str | None = None,
         duration: int | None = None,
         resolution: str | None = None,
+        allow_text_to_video: bool = False,
     ) -> dict:
-        """Generate a video (text-to-video or image-to-video).
+        """Generate a video from a chosen still frame (image-to-video).
 
-        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
-          1. Call WITHOUT `confirm` first → returns a `preview` with
-             `estimatedCredits`. Show that cost to the user verbatim and
-             ASK: "You are going to spend X credits. Proceed?".
-          2. Only AFTER the user agrees, re-call with `confirm=True` to
-             actually generate the video. NEVER set `confirm=True` on your
-             own initiative.
+        STORYBOARD-FIRST POLICY (HARD ENFORCED):
+          You may NOT call this tool without an `image_url`. The required
+          flow when the user asks for a video is:
+            1. Call `studio_storyboard_frames(prompt, n=3)` to produce frame
+               candidates.
+            2. Show every returned `imageUrl` to the user and ask which ONE
+               to animate.
+            3. Call THIS tool with the chosen URL as `image_url` (no
+               `confirm`) → returns a `preview` with `estimatedCredits`.
+            4. Show that cost to the user, ask "Proceed?".
+            5. Only AFTER the user agrees, re-call with `confirm=True` to
+               actually generate the video.
 
-        Defaults to `bytedance/seedance-2.0-fast` (Seedance 2.0 Fast,
-        720p, ~5s). Pass `image_url` for image-to-video on supported models.
+          If the user EXPLICITLY says they want raw text-to-video and have
+          opted out of storyboarding, pass `allow_text_to_video=True`. Do
+          NOT set this on your own initiative; it must come from the user.
+
+        Defaults to `bytedance/seedance-2.0-fast` (720p, ~5s).
         `duration` is seconds (model-dependent, typically 5–10).
         `resolution` is one of `480p | 720p | 1080p` (model-dependent;
         Seedance 2.0 Fast tops out at 720p).
 
-        If `image_url` is provided it MUST be a real URL the user gave you;
-        never fabricate one.
+        If `image_url` is provided it MUST be a real URL — either one
+        returned by `studio_storyboard_frames` or one the user gave you.
+        NEVER fabricate one.
         """
+        # STORYBOARD-FIRST HARD GATE
+        if not image_url and not allow_text_to_video:
+            return {
+                "ok": False,
+                "error": "storyboard_required",
+                "requiresStoryboard": True,
+                "suggestedTool": "studio_storyboard_frames",
+                "message": (
+                    "Video generation requires a still frame to animate. Call "
+                    "`studio_storyboard_frames(prompt=..., n=3)` first to generate "
+                    "frame candidates, show every returned `imageUrl` to the user, "
+                    "ask which ONE to animate, then re-call this tool with that "
+                    "URL as `image_url`.\n\n"
+                    "If — and only if — the user has explicitly asked you to skip "
+                    "the storyboard step and go straight to text-to-video, re-call "
+                    "this tool with `allow_text_to_video=True`."
+                ),
+            }
+
         gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=False)
         if gate:
             return gate
@@ -663,6 +882,7 @@ def register(mcp: FastMCP) -> None:
                 operation_label=(
                     f"video generation · {model}"
                     + (f" · {duration}s" if duration else "")
+                    + (" · image-to-video" if image_url else " · text-to-video")
                 ),
             )
         finally:
@@ -800,6 +1020,7 @@ def register(mcp: FastMCP) -> None:
         studio_digital_twin,
         studio_ugc_room,
         studio_convert_to_3d,
+        studio_storyboard_frames,
         studio_generate_video,
         studio_video_enhance,
         studio_job_status,

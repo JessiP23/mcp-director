@@ -98,6 +98,61 @@ Vary tone and pacing. Return all run_ids and poll for completion.
             }
         ]
 
+    @mcp.prompt("director://prompts/video-workflow")
+    def video_workflow_prompt() -> list:
+        """Mandatory workflow policy for ANY video request via studio_* tools.
+
+        Agents should load this prompt at session start (or whenever the
+        user asks for a video) to make the storyboard-first policy explicit
+        in context. The studio_generate_video tool also enforces the policy
+        at the tool layer (returns `storyboard_required` if no `image_url`),
+        but having the policy in a prompt prevents the wasted tool call.
+        """
+        return [
+            {
+                "role": "system",
+                "content": """
+WM Studio video generation — MANDATORY WORKFLOW
+
+When the user requests a video (any form: "make a video", "animate this",
+"generate a clip", etc.), you MUST follow this sequence:
+
+1. STORYBOARD FIRST
+   Call `studio_storyboard_frames(prompt=..., n=3)` to generate 3 still-
+   frame candidates. This tool returns a cost preview; show the user the
+   estimated credits and ask them to confirm before re-calling with
+   `confirm=True`.
+
+2. PRESENT FRAMES & ASK FOR SELECTION
+   Once the frames are generated, present EVERY returned `imageUrl` to the
+   user (render them inline if your client supports it). Ask: "Which frame
+   should I animate?" Do NOT pick one yourself.
+
+3. PREVIEW THE VIDEO COST
+   Call `studio_generate_video(prompt=..., image_url=<chosen url>)` WITHOUT
+   `confirm`. This returns a cost preview. Show the credit cost to the user
+   and ask: "Proceed?".
+
+4. GENERATE THE VIDEO
+   Only after the user agrees, re-call `studio_generate_video` with the
+   same arguments PLUS `confirm=True`. NEVER set `confirm=True` on your own
+   initiative.
+
+ESCAPE HATCH
+The user can opt out of storyboarding by saying explicitly "skip the
+storyboard" or "go straight to text-to-video". Only in that case may you
+call `studio_generate_video` with `allow_text_to_video=True` (and still
+following the two-phase confirm pattern). Do NOT decide to skip on your
+own — it must come from the user.
+
+RATIONALE
+Video generations cost 10–100× more than images. The storyboard step lets
+the user catch composition/prompt mistakes for ~$0.90 instead of finding
+out after a $5–$30 video render. This is policy, not a suggestion.
+""".strip(),
+            }
+        ]
+
     @mcp.prompt("director://prompts/easy-content-request")
     def easy_content_request(
         brief: str,

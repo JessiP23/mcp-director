@@ -172,7 +172,8 @@ Use WM Studio MCP to generate a launch thumbnail image for my product.
 Direct access to WM Studio's creative-studio endpoints (single-asset image/video, web search, credits).
 
 - `studio_generate_image` — text-to-image / image-to-image. Default model: `fal-ai/nano-banana-pro` (auto-switches to `fal-ai/nano-banana-pro/edit` when an `image_url` is passed).
-- `studio_generate_video` — text-to-video / image-to-video. Default model: `bytedance/seedance-2.0-fast`.
+- `studio_storyboard_frames` — generate N image **frame candidates** (default 3) in parallel for the user to choose from before animating. **Required first step for any video request** (see policy below).
+- `studio_generate_video` — image-to-video from a chosen still frame. Default model: `bytedance/seedance-2.0-fast`. **Refuses to run without `image_url`** unless the user explicitly opts in to text-to-video via `allow_text_to_video=True`.
 - `studio_upscale_image` / `studio_video_enhance` — Topaz upscaling.
 - `studio_camera_angles` / `studio_brandshot` / `studio_casting` / `studio_digital_twin` / `studio_ugc_room` — preset image flows.
 - `studio_convert_to_3d` — image → GLB.
@@ -200,6 +201,33 @@ Generation tools refuse to spend credits on the first call. The flow is:
 3. If the user accepts, agent re-calls the **same tool** with `confirm=True` to actually generate.
 
 This guarantees the user sees the cost and explicitly opts in for every paid generation.
+
+#### Storyboard-first video policy (HARD-ENFORCED)
+
+`studio_generate_video` refuses any text-to-video call by default. The required flow for *any* video request is:
+
+1. **Storyboard** — agent calls `studio_storyboard_frames(prompt=..., n=3)` (two-phase confirm: preview total cost, user confirms, re-call with `confirm=True`).
+2. **User selection** — agent presents every returned `imageUrl` and asks the user *"which frame should I animate?"*.
+3. **Video preview** — agent calls `studio_generate_video(prompt=..., image_url=<chosen URL>)` *without* `confirm` → returns a `preview` with the credit cost.
+4. **User confirms** — agent shows the cost, asks "Proceed?", and only on yes re-calls with `confirm=True`.
+
+If an agent tries to call `studio_generate_video` without an `image_url`, it gets back:
+
+```json
+{
+  "ok": false,
+  "error": "storyboard_required",
+  "requiresStoryboard": true,
+  "suggestedTool": "studio_storyboard_frames",
+  "message": "Video generation requires a still frame to animate. Call `studio_storyboard_frames(...)` first..."
+}
+```
+
+**Escape hatch:** if (and only if) the user explicitly opts out of storyboarding, the agent may call `studio_generate_video(..., allow_text_to_video=True)`. Agents must never set this flag on their own initiative.
+
+The same policy is also exposed as the MCP prompt `director://prompts/video-workflow` and embedded in the server's top-level `instructions` so clients (Claude.ai, Cursor, etc.) see it at session start.
+
+**Why:** video generations cost 10–100× more than images. The storyboard step lets the user catch composition/prompt mistakes for ~$0.90 instead of finding out after a $5–$30 video render.
 
 ## Deploy (Fly.io)
 

@@ -33,7 +33,18 @@ structlog.configure(
 mcp = FastMCP(
     "director-mcp",
     instructions=(
-        "AI video pipeline control — run, manage, and query director-cut productions"
+        "AI video pipeline control — run, manage, and query director-cut productions.\n\n"
+        "VIDEO REQUESTS — MANDATORY WORKFLOW (storyboard-first):\n"
+        "When the user asks for a video via the studio_* tools, you MUST:\n"
+        "  1. Call `studio_storyboard_frames(prompt, n=3)` FIRST to generate "
+        "frame candidates (two-phase confirm: preview then confirm=True).\n"
+        "  2. Present every returned imageUrl to the user and ask which ONE "
+        "to animate. Do not pick yourself.\n"
+        "  3. Call `studio_generate_video(prompt, image_url=<chosen>)` for a "
+        "cost preview, show it to the user, then re-call with confirm=True.\n"
+        "Only call `studio_generate_video` without an image_url if the user "
+        "explicitly opted out — and only then with allow_text_to_video=True. "
+        "See director://prompts/video-workflow for the full policy."
     ),
     version="1.0.0",
     middleware=[
