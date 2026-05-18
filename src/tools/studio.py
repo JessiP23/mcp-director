@@ -14,11 +14,15 @@ the response is `{ jobId, status: "processing" }` and the caller polls via
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from typing import Any
 
+import httpx
 import structlog
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_request
+from mcp.types import ImageContent, TextContent
 
 from src.config import get_settings
 from src.wmstudio_client import (
@@ -229,12 +233,138 @@ async def _preview_or_run(
     }
 
 
+# ---------------------------------------------------------------------------
+# Inline image rendering
+#
+# Claude Desktop (and MCP-compliant clients) renders `ImageContent` blocks
+# inline, so the user sees the actual image instead of a clickable URL.
+# The trade-off is bandwidth: the MCP server downloads the bytes from R2
+# and base64-encodes them. We cap the size and stream so a single tool
+# call never blows up memory.
+#
+# Videos are NOT inlined (no ImageContent for video in MCP); we just
+# embed a markdown link in a TextContent block so it renders nicely.
+# ---------------------------------------------------------------------------
+
+# Soft cap: anything larger than this falls back to a URL-only response
+# so the JSON-RPC payload stays well under client limits.
+_INLINE_IMAGE_MAX_BYTES = 6 * 1024 * 1024  # 6 MiB
+_INLINE_IMAGE_TIMEOUT_S = 20.0
+
+
+async def _fetch_image_bytes(url: str) -> tuple[bytes, str] | None:
+    """Download `url` and return `(bytes, mime_type)` or None on any failure.
+
+    Uses a fresh httpx client (no auth headers — R2 public URLs are open).
+    Caps download at `_INLINE_IMAGE_MAX_BYTES` so an oversized asset
+    aborts cleanly instead of OOM'ing the server.
+    """
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_INLINE_IMAGE_TIMEOUT_S, connect=5.0),
+            follow_redirects=True,
+        ) as http:
+            async with http.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    log.warning("inline_image_bad_status", url=url, status=resp.status_code)
+                    return None
+                content_type = (resp.headers.get("content-type") or "image/png").split(";")[0].strip()
+                if not content_type.startswith("image/"):
+                    log.warning("inline_image_bad_content_type", url=url, ct=content_type)
+                    return None
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > _INLINE_IMAGE_MAX_BYTES:
+                        log.warning("inline_image_oversize", url=url, bytes=total)
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks), content_type
+    except (httpx.HTTPError, asyncio.TimeoutError) as e:
+        log.warning("inline_image_fetch_failed", url=url, err=str(e)[:200])
+        return None
+
+
+def _image_content(data: bytes, mime_type: str) -> ImageContent:
+    return ImageContent(
+        type="image",
+        data=base64.b64encode(data).decode("ascii"),
+        mimeType=mime_type,
+    )
+
+
+async def _render_with_inline_image(structured: dict[str, Any]) -> Any:
+    """Wrap a single-image generation response so Claude renders it inline.
+
+    Returns either:
+      - the original dict unchanged (no URL, fetch failed, or oversize), OR
+      - a list `[ImageContent, TextContent(json)]` so MCP clients render
+        the image inline AND keep the structured fields (creditsRemaining,
+        generationId, etc.) accessible to the agent.
+    """
+    if not isinstance(structured, dict):
+        return structured
+    url = _extract_image_url(structured)
+    if not url:
+        return structured
+    fetched = await _fetch_image_bytes(url)
+    if fetched is None:
+        return structured
+    data, mime = fetched
+    return [
+        _image_content(data, mime),
+        TextContent(type="text", text=json.dumps(structured, default=str)),
+    ]
+
+
+async def _render_with_inline_images(
+    structured: dict[str, Any],
+    *,
+    url_picker,  # type: ignore[no-untyped-def] — callable extracting URLs
+) -> Any:
+    """Storyboard variant: render multiple frame images inline in order.
+
+    `url_picker(structured) -> list[str]` returns each frame URL. Frames
+    are downloaded in parallel; any failure falls back to URL-only for
+    that frame (the structured response still includes them all).
+    """
+    if not isinstance(structured, dict):
+        return structured
+    urls: list[str] = url_picker(structured) or []
+    if not urls:
+        return structured
+    results = await asyncio.gather(*(_fetch_image_bytes(u) for u in urls))
+    blocks: list[Any] = []
+    for r in results:
+        if r is None:
+            continue
+        data, mime = r
+        blocks.append(_image_content(data, mime))
+    if not blocks:
+        return structured
+    blocks.append(TextContent(type="text", text=json.dumps(structured, default=str)))
+    return blocks
+
+
+def _video_markdown_block(structured: dict[str, Any]) -> TextContent | None:
+    """Build a markdown TextContent block for a video URL so Claude
+    renders a nice clickable preview alongside the structured payload.
+
+    Returns None if the response has no videoUrl.
+    """
+    url = structured.get("videoUrl") if isinstance(structured, dict) else None
+    if not isinstance(url, str) or not url:
+        return None
+    return TextContent(type="text", text=f"**Video ready:** [{url}]({url})")
+
+
 async def _run_billed(
     client: WMStudioClient,
     op,  # type: ignore[no-untyped-def] — bound coroutine method
     *args: Any,
     resolve_kind: str | None = None,
-) -> dict[str, Any]:
+) -> Any:
     """Run a billed wmstudio operation with credit-aware error handling.
 
     - HTTP 402 (`requiresTopUp: true`) → structured upgrade response (no exception).
@@ -246,6 +376,12 @@ async def _run_billed(
     (`{queued: true, jobId}`) are polled via `_resolve_generation_response`
     so the tool always returns a usable asset URL instead of forcing the
     agent to chain `studio_job_status`.
+
+    For `resolve_kind="image"` the final response is wrapped with an
+    inline `ImageContent` block so Claude renders the image directly in
+    chat instead of just showing a URL. For `resolve_kind="video"` we
+    add a markdown link block. On any rendering failure we transparently
+    fall back to the plain structured dict so the tool stays robust.
     """
     try:
         result = await op(*args)
@@ -278,7 +414,14 @@ async def _run_billed(
                 "message": str(e.message),
                 "raw": result,
             })
-    return await _attach_credit_status(client, result)
+    structured = await _attach_credit_status(client, result)
+    if resolve_kind == "image" and isinstance(structured, dict) and structured.get("ok") is not False:
+        return await _render_with_inline_image(structured)
+    if resolve_kind == "video" and isinstance(structured, dict) and structured.get("ok") is not False:
+        block = _video_markdown_block(structured)
+        if block is not None:
+            return [block, TextContent(type="text", text=json.dumps(structured, default=str))]
+    return structured
 
 
 async def _gate_asset_url(
@@ -1005,7 +1148,16 @@ def register(mcp: FastMCP) -> None:
             if len(frames) < n:
                 response["partial"] = True
                 response["failed"] = n - len(frames)
-            return await _attach_credit_status(client, response)
+            structured = await _attach_credit_status(client, response)
+            # Render every frame inline so Claude shows the candidates
+            # directly in chat. Falls back to URL-only if any fetch fails.
+            return await _render_with_inline_images(
+                structured,
+                url_picker=lambda r: [
+                    f.get("imageUrl") for f in (r.get("frames") or [])
+                    if isinstance(f, dict) and isinstance(f.get("imageUrl"), str)
+                ],
+            )
         finally:
             await client.aclose()
 

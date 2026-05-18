@@ -28,7 +28,10 @@ primary_region = 'ewr'
     protocol = "http"
 
 [[vm]]
+  # shared-cpu-2x with 1GB RAM — handles inline image rendering (R2 download +
+  # base64 encode) plus parallel storyboard frame fetches without OOM. Upgrade
+  # to performance-2x or 2GB if response latency becomes an issue under load.
   memory = '1gb'
   cpu_kind = 'shared'
-  cpus = 1
+  cpus = 2
   memory_mb = 1024
