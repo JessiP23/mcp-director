@@ -246,9 +246,10 @@ async def _run_billed(
     - Other upstream errors propagate as `WMStudioClientError` for the tool's
       own catch (or surface as MCP error).
 
-    If `resolve_kind="image"`, queued responses (`{queued: true, jobId}`) are
-    polled via `_resolve_image_response` so the tool always returns a usable
-    `imageUrl` instead of forcing the agent to chain `studio_job_status`.
+    If `resolve_kind` is `"image"` or `"video"`, queued responses
+    (`{queued: true, jobId}`) are polled via `_resolve_generation_response`
+    so the tool always returns a usable asset URL instead of forcing the
+    agent to chain `studio_job_status`.
     """
     try:
         result = await op(*args)
