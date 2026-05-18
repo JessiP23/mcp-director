@@ -174,6 +174,7 @@ async def _preview_or_run(
     *,
     confirm: bool,
     operation_label: str,
+    resolve_kind: str | None = None,
 ) -> dict[str, Any]:
     """Two-phase confirmation pattern for billed operations.
 
@@ -188,7 +189,7 @@ async def _preview_or_run(
     agent can read aloud verbatim.
     """
     if confirm:
-        return await _run_billed(client, op, payload)
+        return await _run_billed(client, op, payload, resolve_kind=resolve_kind)
 
     try:
         estimate = await client.estimate_pricing(payload)
@@ -236,6 +237,7 @@ async def _run_billed(
     client: WMStudioClient,
     op,  # type: ignore[no-untyped-def] — bound coroutine method
     *args: Any,
+    resolve_kind: str | None = None,
 ) -> dict[str, Any]:
     """Run a billed wmstudio operation with credit-aware error handling.
 
@@ -243,6 +245,10 @@ async def _run_billed(
     - Success → response is augmented with `creditsRemaining` + low-credit warning.
     - Other upstream errors propagate as `WMStudioClientError` for the tool's
       own catch (or surface as MCP error).
+
+    If `resolve_kind="image"`, queued responses (`{queued: true, jobId}`) are
+    polled via `_resolve_image_response` so the tool always returns a usable
+    `imageUrl` instead of forcing the agent to chain `studio_job_status`.
     """
     try:
         result = await op(*args)
@@ -254,6 +260,27 @@ async def _run_billed(
         return _upgrade_required(e.payload)
     if not isinstance(result, dict):
         return result  # type: ignore[unreachable]
+    if resolve_kind in ("image", "video"):
+        try:
+            result = await _resolve_generation_response(client, result, kind=resolve_kind)
+        except WMStudioClientError as e:
+            # Polling failed/timed out — credits are already spent. Surface
+            # jobId so the user can recover via studio_job_status, but do not
+            # claim success.
+            log.warning(
+                "studio_tool_resolve_failed",
+                status=e.status_code,
+                jobId=(result.get("jobId") if isinstance(result, dict) else None),
+                message=str(e.message)[:200],
+            )
+            return await _attach_credit_status(client, {
+                "ok": False,
+                "error": "queued_unresolved",
+                "jobId": result.get("jobId"),
+                "creditsCharged": result.get("creditsCharged"),
+                "message": str(e.message),
+                "raw": result,
+            })
     return await _attach_credit_status(client, result)
 
 
@@ -279,6 +306,110 @@ async def _gate_asset_url(
     if not await _verify_asset_url(url):
         return _upload_required(asset_kind, param, reason="unreachable")
     return None
+
+
+def _extract_image_url(payload: dict[str, Any]) -> str | None:
+    """Pull the image URL out of a generate-image response (any shape)."""
+    if not isinstance(payload, dict):
+        return None
+    direct = payload.get("imageUrl") or payload.get("resultUrl") or payload.get("outputUrl")
+    if isinstance(direct, str) and direct:
+        return direct
+    images = payload.get("images")
+    if isinstance(images, list) and images:
+        first = images[0]
+        if isinstance(first, dict):
+            url = first.get("url") or first.get("imageUrl")
+            if isinstance(url, str) and url:
+                return url
+        elif isinstance(first, str):
+            return first
+    return None
+
+
+async def _resolve_queued_job(
+    client: WMStudioClient,
+    job_id: str,
+    *,
+    timeout_s: float = 180.0,
+    initial_wait_s: float = 2.0,
+    max_wait_s: float = 8.0,
+) -> dict[str, Any]:
+    """Poll a creative-studio job until it reaches a terminal state.
+
+    Returns the final job snapshot. Raises `WMStudioClientError` if the job
+    fails or the timeout elapses (so callers can decide whether to surface
+    the jobId for later resumption).
+
+    Credits are charged at queue submission time — a polling timeout here
+    does NOT mean the user wasn't charged. The caller must include the
+    `jobId` in any user-facing error so they can re-poll later.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    wait = initial_wait_s
+    last: dict[str, Any] = {}
+    while True:
+        snapshot = await client.get_job(job_id)
+        last = snapshot if isinstance(snapshot, dict) else {}
+        status = last.get("status")
+        if status in ("completed", "failed", "cancelled"):
+            if status == "completed":
+                return last
+            err = last.get("error") or f"job {status}"
+            raise WMStudioClientError(
+                502, f"queued generation {status}: {err}", payload=last
+            )
+        if asyncio.get_event_loop().time() >= deadline:
+            raise WMStudioClientError(
+                504,
+                f"queued generation still {status or 'pending'} after {timeout_s:.0f}s "
+                f"(jobId={job_id}); credits already charged. Re-poll with "
+                f"studio_job_status to recover the result.",
+                payload=last,
+            )
+        await asyncio.sleep(wait)
+        wait = min(wait * 1.5, max_wait_s)
+
+
+async def _resolve_generation_response(
+    client: WMStudioClient,
+    raw: dict[str, Any],
+    *,
+    kind: str,
+    timeout_s: float = 180.0,
+) -> dict[str, Any]:
+    """Normalize an inline OR queued generate-* response into one with the
+    asset URL populated under the right key (`imageUrl` for kind="image",
+    `videoUrl` for kind="video"). Credits are preserved as-is.
+
+    - Inline response (sync fal): returns `raw` unchanged (URL already there).
+    - Queued response (`queued: true` + `jobId`): polls until completed,
+      then merges the resolved URL back into `raw` so callers see one shape.
+    """
+    if not isinstance(raw, dict):
+        return raw  # type: ignore[unreachable]
+
+    url_key = "videoUrl" if kind == "video" else "imageUrl"
+
+    # Inline path: URL already present (either at the right key or via images[]).
+    if raw.get(url_key) or (kind == "image" and _extract_image_url(raw)):
+        return raw
+
+    job_id = raw.get("jobId") or raw.get("id")
+    is_queued = raw.get("queued") is True or raw.get("status") in ("queued", "processing")
+    if not (is_queued and isinstance(job_id, str) and job_id):
+        return raw  # nothing we can do — return as-is and let caller decide
+
+    snapshot = await _resolve_queued_job(client, job_id, timeout_s=timeout_s)
+    url = snapshot.get("resultUrl") or _extract_image_url(snapshot)
+    merged = dict(raw)
+    if isinstance(url, str) and url:
+        merged[url_key] = url
+        if kind == "image":
+            merged["images"] = [{"url": url}]
+    merged["jobId"] = job_id
+    merged["jobStatus"] = snapshot.get("status")
+    return merged
 
 
 async def _verify_asset_url(url: str) -> bool:
@@ -364,6 +495,7 @@ def register(mcp: FastMCP) -> None:
                 payload,
                 confirm=confirm,
                 operation_label=f"image generation · {resolved_model}",
+                resolve_kind="image",
             )
         finally:
             await client.aclose()
@@ -406,7 +538,7 @@ def register(mcp: FastMCP) -> None:
                 "output_format": output_format,
                 "prompt": "",  # required by route shape; ignored by upscale handlers
             }
-            return await _run_billed(client, client.generate_image, payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
             await client.aclose()
 
@@ -440,7 +572,7 @@ def register(mcp: FastMCP) -> None:
                 "imageUrl": image_url,
                 "metadata": {"toolId": "camera_angles", "camera": camera},
             })
-            return await _run_billed(client, client.generate_image, payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
             await client.aclose()
 
@@ -477,7 +609,7 @@ def register(mcp: FastMCP) -> None:
                 "imageUrl": product_image_url,
                 "metadata": metadata,
             })
-            return await _run_billed(client, client.generate_image, payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
             await client.aclose()
 
@@ -512,7 +644,7 @@ def register(mcp: FastMCP) -> None:
                 "aspect_ratio": aspect_ratio,
                 "metadata": metadata,
             })
-            return await _run_billed(client, client.generate_image, payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
             await client.aclose()
 
@@ -540,7 +672,7 @@ def register(mcp: FastMCP) -> None:
                 "digitalTwinProfileId": digital_twin_profile_id,
                 "digitalTwinEnhancementPreset": enhancement_preset,
             })
-            return await _run_billed(client, client.generate_image, payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
             await client.aclose()
 
@@ -578,7 +710,7 @@ def register(mcp: FastMCP) -> None:
                 "imageUrl": product_image_url,
                 "metadata": metadata,
             })
-            return await _run_billed(client, client.generate_image, payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
             await client.aclose()
 
@@ -608,7 +740,7 @@ def register(mcp: FastMCP) -> None:
                 "prompt": "",
                 "metadata": {"toolId": "convert_to_3d", "is3D": True},
             }
-            return await _run_billed(client, client.generate_image, payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
             await client.aclose()
 
@@ -726,7 +858,12 @@ def register(mcp: FastMCP) -> None:
                     payload["seed"] = int(seed) + idx
                 try:
                     res = await client.generate_image(payload)
-                    return {"ok": True, "index": idx, "result": res}
+                    # Queue-mode (CREATIVE_STUDIO_QUEUE_ENABLED) returns
+                    # { queued: true, jobId, creditsCharged } and the URL
+                    # only materializes after polling. Resolve here so the
+                    # frame array always has a real imageUrl.
+                    resolved = await _resolve_generation_response(client, res, kind="image")
+                    return {"ok": True, "index": idx, "result": resolved}
                 except InsufficientCreditsError as e:
                     return {"ok": False, "index": idx, "error": "insufficient_credits", "payload": e.payload}
                 except WMStudioClientError as e:
@@ -736,7 +873,12 @@ def register(mcp: FastMCP) -> None:
                         status=e.status_code,
                         message=str(e.message)[:200],
                     )
-                    return {"ok": False, "index": idx, "error": str(e.message)}
+                    return {
+                        "ok": False,
+                        "index": idx,
+                        "error": str(e.message),
+                        "payload": e.payload,
+                    }
 
             outcomes = await asyncio.gather(*[_one(i) for i in range(n)])
 
@@ -750,35 +892,52 @@ def register(mcp: FastMCP) -> None:
                 return _upgrade_required(first_credits_fail.get("payload") or {})
 
             frames: list[dict[str, Any]] = []
+            unresolved: list[dict[str, Any]] = []
             credits_charged = 0
             for o in outcomes:
                 if not o["ok"]:
                     continue
-                res = o["result"]
-                image_url = (
-                    res.get("imageUrl")
-                    or (res.get("images") or [{}])[0].get("url")
-                    if isinstance(res, dict)
-                    else None
-                )
-                frames.append({
-                    "index": o["index"],
-                    "imageUrl": image_url,
-                    "generationId": res.get("generationId") if isinstance(res, dict) else None,
-                })
-                cc = res.get("creditsCharged") if isinstance(res, dict) else None
+                res = o["result"] if isinstance(o["result"], dict) else {}
+                image_url = _extract_image_url(res)
+                cc = res.get("creditsCharged")
                 if isinstance(cc, (int, float)):
                     credits_charged += int(cc)
+                if image_url:
+                    frames.append({
+                        "index": o["index"],
+                        "imageUrl": image_url,
+                        "generationId": res.get("generationId") or res.get("id"),
+                        "jobId": res.get("jobId"),
+                    })
+                else:
+                    # Charged but no URL surfaced (queue still pending or shape
+                    # we don't know). Surface jobId so the user can recover.
+                    unresolved.append({
+                        "index": o["index"],
+                        "jobId": res.get("jobId"),
+                        "generationId": res.get("generationId") or res.get("id"),
+                        "creditsCharged": cc,
+                        "status": res.get("jobStatus") or res.get("status"),
+                    })
 
             if not frames:
                 return {
                     "ok": False,
-                    "error": "all_frames_failed",
-                    "message": (
-                        f"All {n} frame generations failed. No credits were charged "
-                        f"for the failures."
-                    ),
+                    "error": "all_frames_failed" if not unresolved else "frames_unresolved",
+                    "creditsCharged": credits_charged,
+                    "unresolvedFrames": unresolved,
                     "failures": [o for o in outcomes if not o["ok"]],
+                    "message": (
+                        f"None of the {n} frame generations returned a usable image URL. "
+                        + (
+                            f"{credits_charged} credits were already charged at queue submission. "
+                            f"Use `studio_job_status` with each `jobId` below to recover the URLs "
+                            f"once the jobs complete — do NOT call studio_storyboard_frames again "
+                            f"or you'll be charged a second time."
+                            if credits_charged > 0
+                            else "No credits were charged."
+                        )
+                    ),
                 }
 
             # Pull final balance once (cheaper than reading each per-frame response).
@@ -884,6 +1043,7 @@ def register(mcp: FastMCP) -> None:
                     + (f" · {duration}s" if duration else "")
                     + (" · image-to-video" if image_url else " · text-to-video")
                 ),
+                resolve_kind="video",  # queue path: poll jobId, surface resultUrl as videoUrl
             )
         finally:
             await client.aclose()
