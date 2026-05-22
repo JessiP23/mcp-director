@@ -22,7 +22,7 @@ import httpx
 import structlog
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_request
-from mcp.types import ImageContent, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from src.config import get_settings
 from src.wmstudio_client import (
@@ -179,6 +179,7 @@ async def _preview_or_run(
     confirm: bool,
     operation_label: str,
     resolve_kind: str | None = None,
+    extra_structured: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Two-phase confirmation pattern for billed operations.
 
@@ -193,7 +194,7 @@ async def _preview_or_run(
     agent can read aloud verbatim.
     """
     if confirm:
-        return await _run_billed(client, op, payload, resolve_kind=resolve_kind)
+        return await _run_billed(client, op, payload, resolve_kind=resolve_kind, extra_structured=extra_structured)
 
     try:
         estimate = await client.estimate_pricing(payload)
@@ -364,6 +365,7 @@ async def _run_billed(
     op,  # type: ignore[no-untyped-def] — bound coroutine method
     *args: Any,
     resolve_kind: str | None = None,
+    extra_structured: dict[str, Any] | None = None,
 ) -> Any:
     """Run a billed wmstudio operation with credit-aware error handling.
 
@@ -418,9 +420,26 @@ async def _run_billed(
     if resolve_kind == "image" and isinstance(structured, dict) and structured.get("ok") is not False:
         return await _render_with_inline_image(structured)
     if resolve_kind == "video" and isinstance(structured, dict) and structured.get("ok") is not False:
-        block = _video_markdown_block(structured)
-        if block is not None:
-            return [block, TextContent(type="text", text=json.dumps(structured, default=str))]
+        sc: dict[str, Any] = {
+            "videoUrl": structured.get("videoUrl"),
+            "model": structured.get("model"),
+            "duration": structured.get("duration"),
+            "resolution": structured.get("resolution"),
+            "creditsCharged": structured.get("creditsCharged"),
+            "creditsRemaining": structured.get("creditsRemaining"),
+        }
+        if extra_structured:
+            for k, v in extra_structured.items():
+                if v is not None and k not in sc:
+                    sc[k] = v
+        video_url = sc.get("videoUrl", "")
+        content_blocks: list[Any] = [
+            TextContent(type="text", text=f"Video ready: {video_url}" if video_url else "Video ready."),
+        ]
+        return CallToolResult(
+            content=content_blocks,
+            structuredContent=sc,
+        )
     return structured
 
 
@@ -1149,21 +1168,45 @@ def register(mcp: FastMCP) -> None:
                 response["partial"] = True
                 response["failed"] = n - len(frames)
             structured = await _attach_credit_status(client, response)
-            # Render every frame inline so Claude shows the candidates
-            # directly in chat. Falls back to URL-only if any fetch fails.
-            return await _render_with_inline_images(
-                structured,
-                url_picker=lambda r: [
-                    f.get("imageUrl") for f in (r.get("frames") or [])
-                    if isinstance(f, dict) and isinstance(f.get("imageUrl"), str)
-                ],
+            # Build structuredContent for MCP App viewer iframe
+            sc_frames = [
+                {
+                    "index": f["index"],
+                    "imageUrl": f["imageUrl"],
+                    "generationId": f.get("generationId"),
+                    "aspectRatio": aspect_ratio,
+                }
+                for f in frames
+            ]
+            # Download images for inline ImageContent blocks (native Claude rendering)
+            image_urls = [f["imageUrl"] for f in frames]
+            fetched = await asyncio.gather(*(_fetch_image_bytes(u) for u in image_urls))
+            content_blocks: list[Any] = []
+            for r in fetched:
+                if r is not None:
+                    data, mime = r
+                    content_blocks.append(_image_content(data, mime))
+            content_blocks.append(
+                TextContent(type="text", text=f"{len(frames)} frames ready. Select one to animate.")
+            )
+            return CallToolResult(
+                content=content_blocks,
+                structuredContent={
+                    "frames": sc_frames,
+                    "count": len(frames),
+                    "creditsCharged": credits_charged,
+                    "creditsRemaining": structured.get("creditsRemaining"),
+                },
             )
         finally:
             await client.aclose()
 
     # ---------- Video ----------
 
-    @mcp.tool(name="studio_generate_video")
+    @mcp.tool(
+        name="studio_generate_video",
+        meta={"ui": {"resourceUri": "ui://wmstudio/video-player"}},
+    )
     async def studio_generate_video(
         prompt: str,
         confirm: bool = False,
@@ -1244,7 +1287,12 @@ def register(mcp: FastMCP) -> None:
                     + (f" · {duration}s" if duration else "")
                     + (" · image-to-video" if image_url else " · text-to-video")
                 ),
-                resolve_kind="video",  # queue path: poll jobId, surface resultUrl as videoUrl
+                resolve_kind="video",
+                extra_structured=_drop_none({
+                    "model": model,
+                    "duration": duration,
+                    "resolution": resolution,
+                }),
             )
         finally:
             await client.aclose()
