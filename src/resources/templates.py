@@ -47,6 +47,7 @@ video{width:100%;display:block;max-height:480px;background:#000}
 .dl:hover{background:#222}
 .retry{flex:1;text-align:center;padding:7px 12px;background:#1a1a1a;color:#888;font-size:13px;font-weight:600;border-radius:6px;border:none;cursor:pointer}
 .retry:hover{background:#222;color:#fff}
+#debug{position:fixed;bottom:0;left:0;right:0;max-height:120px;overflow-y:auto;background:rgba(0,0,0,.9);color:#0f0;font-size:10px;padding:6px;font-family:monospace;white-space:pre-wrap;border-top:1px solid #333}
 </style></head><body>
 <video id="v" controls autoplay muted loop playsinline></video>
 <div class="meta" id="meta"></div>
@@ -54,9 +55,16 @@ video{width:100%;display:block;max-height:480px;background:#000}
   <a class="dl" id="dl" href="#" download="video.mp4">⬇ Download</a>
   <button class="retry" id="retry">↩ Try different frame</button>
 </div>
+<div id="debug"></div>
 <script>
-(function(){function send(t){window.parent.postMessage({type:"prompt",text:t},"*");}
-window.addEventListener("message",function(e){var d=e.data;if(d&&d.type==="toolResult"&&d.data){var r=d.data;var url=r.videoUrl||r.url||"";document.getElementById("v").src=url;document.getElementById("dl").href=url;document.getElementById("meta").innerHTML="<span><b>Model</b> "+(r.model||"—")+"</span><span><b>Duration</b> "+(r.duration||"—")+"s</span><span><b>Resolution</b> "+(r.resolution||"—")+"</span><span><b>Credits used</b> "+(r.creditsCharged||"—")+"</span><span><b>Remaining</b> "+(r.creditsRemaining||"—")+"</span>";}});
+(function(){function log(m){var d=document.getElementById("debug");d.textContent+=m+"\n";d.scrollTop=d.scrollHeight;}
+function send(t){var msg={jsonrpc:"2.0",method:"sampling/createMessage",params:{messages:[{role:"user",content:{type:"text",text:t}}]}};log("SEND: "+JSON.stringify(msg).slice(0,200));window.parent.postMessage(msg,"*");}
+log("iframe loaded, listening...");
+window.addEventListener("message",function(e){log("RECV: "+JSON.stringify(e.data).slice(0,300));var d=e.data;
+// JSON-RPC result
+if(d&&d.result){var r=d.result;var sc=r.structuredContent||r;var url=sc.videoUrl||sc.url||r.videoUrl||"";log("videoUrl="+url);document.getElementById("v").src=url;document.getElementById("dl").href=url;document.getElementById("meta").innerHTML="<span><b>Model</b> "+(sc.model||"—")+"</span><span><b>Duration</b> "+(sc.duration||"—")+"s</span><span><b>Resolution</b> "+(sc.resolution||"—")+"</span><span><b>Credits used</b> "+(sc.creditsCharged||"—")+"</span><span><b>Remaining</b> "+(sc.creditsRemaining||"—")+"</span>";return;}
+// Legacy format
+if(d&&d.type==="toolResult"&&d.data){var r=d.data;var url=r.videoUrl||r.url||"";log("videoUrl="+url);document.getElementById("v").src=url;document.getElementById("dl").href=url;document.getElementById("meta").innerHTML="<span><b>Model</b> "+(r.model||"—")+"</span><span><b>Duration</b> "+(r.duration||"—")+"s</span><span><b>Resolution</b> "+(r.resolution||"—")+"</span><span><b>Credits used</b> "+(r.creditsCharged||"—")+"</span><span><b>Remaining</b> "+(r.creditsRemaining||"—")+"</span>";}});
 document.getElementById("retry").onclick=function(){send("I want to pick a different frame");};
 })();</script></body></html>"""
 
