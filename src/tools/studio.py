@@ -946,7 +946,10 @@ def register(mcp: FastMCP) -> None:
 
     # ---------- Storyboard (frame candidates for video) ----------
 
-    @mcp.tool(name="studio_storyboard_frames")
+    @mcp.tool(
+        name="studio_storyboard_frames",
+        meta={"ui": {"resourceUri": "ui://wmstudio/storyboard-viewer"}},
+    )
     async def studio_storyboard_frames(
         prompt: str,
         aspect_ratio: str,

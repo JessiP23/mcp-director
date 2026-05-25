@@ -31,8 +31,10 @@ h3{font-size:12px;color:#666;margin-bottom:12px;letter-spacing:.08em;text-transf
 <p class="hint" id="hint">Select a frame above</p>
 <script>
 (function(){var sel=null,frames=[];
-function send(t){window.parent.postMessage({type:"prompt",text:t},"*");}
-window.addEventListener("message",function(e){var d=e.data;if(d&&d.type==="toolResult"&&d.data){var r=d.data;frames=r.frames||[];var ar=(frames[0]&&frames[0].aspectRatio||"16:9").replace(":","/");document.documentElement.style.setProperty("--ar",ar);var g=document.getElementById("grid");g.innerHTML="";frames.forEach(function(f,i){var div=document.createElement("div");div.className="frame";div.innerHTML='<img src="'+f.imageUrl+'" loading="lazy"/><span class="badge">'+(i+1)+'</span><span class="check">✓</span>';div.onclick=function(){document.querySelectorAll(".frame").forEach(function(e){e.classList.remove("selected")});div.classList.add("selected");sel=f;document.getElementById("btn").disabled=false;document.getElementById("hint").textContent="Frame "+(i+1)+" selected";};g.appendChild(div);});}});
+function send(t){var msg={jsonrpc:"2.0",method:"sampling/createMessage",params:{messages:[{role:"user",content:{type:"text",text:t}}]}};window.parent.postMessage(msg,"*");}
+window.addEventListener("message",function(e){var d=e.data;
+if(d&&d.result){var r=d.result;var sc=r.structuredContent||r;frames=sc.frames||[];var ar=(frames[0]&&frames[0].aspectRatio||"16:9").replace(":","/");document.documentElement.style.setProperty("--ar",ar);var g=document.getElementById("grid");while(g.firstChild)g.removeChild(g.firstChild);frames.forEach(function(f,i){var div=document.createElement("div");div.className="frame";var img=document.createElement("img");img.src=f.imageUrl;img.loading="lazy";div.appendChild(img);var badge=document.createElement("span");badge.className="badge";badge.textContent=i+1;div.appendChild(badge);var check=document.createElement("span");check.className="check";check.textContent="✓";div.appendChild(check);div.onclick=function(){document.querySelectorAll(".frame").forEach(function(e){e.classList.remove("selected")});div.classList.add("selected");sel=f;document.getElementById("btn").disabled=false;document.getElementById("hint").textContent="Frame "+(i+1)+" selected";};g.appendChild(div);});return;}
+if(d&&d.type==="toolResult"&&d.data){var r=d.data;frames=r.frames||[];var ar=(frames[0]&&frames[0].aspectRatio||"16:9").replace(":","/");document.documentElement.style.setProperty("--ar",ar);var g=document.getElementById("grid");while(g.firstChild)g.removeChild(g.firstChild);frames.forEach(function(f,i){var div=document.createElement("div");div.className="frame";var img=document.createElement("img");img.src=f.imageUrl;img.loading="lazy";div.appendChild(img);var badge=document.createElement("span");badge.className="badge";badge.textContent=i+1;div.appendChild(badge);var check=document.createElement("span");check.className="check";check.textContent="✓";div.appendChild(check);div.onclick=function(){document.querySelectorAll(".frame").forEach(function(e){e.classList.remove("selected")});div.classList.add("selected");sel=f;document.getElementById("btn").disabled=false;document.getElementById("hint").textContent="Frame "+(i+1)+" selected";};g.appendChild(div);});}});
 document.getElementById("btn").onclick=function(){if(!sel)return;document.getElementById("hint").textContent="Sending…";document.getElementById("btn").disabled=true;send("Animate frame "+(frames.indexOf(sel)+1)+": "+sel.imageUrl);};
 })();</script></body></html>"""
 
@@ -47,7 +49,6 @@ video{width:100%;display:block;max-height:480px;background:#000}
 .dl:hover{background:#222}
 .retry{flex:1;text-align:center;padding:7px 12px;background:#1a1a1a;color:#888;font-size:13px;font-weight:600;border-radius:6px;border:none;cursor:pointer}
 .retry:hover{background:#222;color:#fff}
-#debug{position:fixed;bottom:0;left:0;right:0;max-height:120px;overflow-y:auto;background:rgba(0,0,0,.9);color:#0f0;font-size:10px;padding:6px;font-family:monospace;white-space:pre-wrap;border-top:1px solid #333}
 </style></head><body>
 <video id="v" controls autoplay muted loop playsinline></video>
 <div class="meta" id="meta"></div>
@@ -55,16 +56,11 @@ video{width:100%;display:block;max-height:480px;background:#000}
   <a class="dl" id="dl" href="#" download="video.mp4">⬇ Download</a>
   <button class="retry" id="retry">↩ Try different frame</button>
 </div>
-<div id="debug"></div>
 <script>
-(function(){function log(m){var d=document.getElementById("debug");d.textContent+=m+"\n";d.scrollTop=d.scrollHeight;}
-function send(t){var msg={jsonrpc:"2.0",method:"sampling/createMessage",params:{messages:[{role:"user",content:{type:"text",text:t}}]}};log("SEND: "+JSON.stringify(msg).slice(0,200));window.parent.postMessage(msg,"*");}
-log("iframe loaded, listening...");
-window.addEventListener("message",function(e){log("RECV: "+JSON.stringify(e.data).slice(0,300));var d=e.data;
-// JSON-RPC result
-if(d&&d.result){var r=d.result;var sc=r.structuredContent||r;var url=sc.videoUrl||sc.url||r.videoUrl||"";log("videoUrl="+url);document.getElementById("v").src=url;document.getElementById("dl").href=url;document.getElementById("meta").innerHTML="<span><b>Model</b> "+(sc.model||"—")+"</span><span><b>Duration</b> "+(sc.duration||"—")+"s</span><span><b>Resolution</b> "+(sc.resolution||"—")+"</span><span><b>Credits used</b> "+(sc.creditsCharged||"—")+"</span><span><b>Remaining</b> "+(sc.creditsRemaining||"—")+"</span>";return;}
-// Legacy format
-if(d&&d.type==="toolResult"&&d.data){var r=d.data;var url=r.videoUrl||r.url||"";log("videoUrl="+url);document.getElementById("v").src=url;document.getElementById("dl").href=url;document.getElementById("meta").innerHTML="<span><b>Model</b> "+(r.model||"—")+"</span><span><b>Duration</b> "+(r.duration||"—")+"s</span><span><b>Resolution</b> "+(r.resolution||"—")+"</span><span><b>Credits used</b> "+(r.creditsCharged||"—")+"</span><span><b>Remaining</b> "+(r.creditsRemaining||"—")+"</span>";}});
+(function(){function send(t){var msg={jsonrpc:"2.0",method:"sampling/createMessage",params:{messages:[{role:"user",content:{type:"text",text:t}}]}};window.parent.postMessage(msg,"*");}
+window.addEventListener("message",function(e){var d=e.data;
+if(d&&d.result){var r=d.result;var sc=r.structuredContent||r;var url=sc.videoUrl||sc.url||r.videoUrl||"";document.getElementById("v").src=url;document.getElementById("dl").href=url;var meta=document.getElementById("meta");while(meta.firstChild)meta.removeChild(meta.firstChild);function addSpan(label,val){var s=document.createElement("span");var b=document.createElement("b");b.textContent=label;s.appendChild(b);s.appendChild(document.createTextNode(" "+(val||"—")));meta.appendChild(s);}addSpan("Model",sc.model);addSpan("Duration",(sc.duration||"—")+"s");addSpan("Resolution",sc.resolution);addSpan("Credits used",sc.creditsCharged);addSpan("Remaining",sc.creditsRemaining);return;}
+if(d&&d.type==="toolResult"&&d.data){var r=d.data;var url=r.videoUrl||r.url||"";document.getElementById("v").src=url;document.getElementById("dl").href=url;var meta=document.getElementById("meta");while(meta.firstChild)meta.removeChild(meta.firstChild);function addSpan(label,val){var s=document.createElement("span");var b=document.createElement("b");b.textContent=label;s.appendChild(b);s.appendChild(document.createTextNode(" "+(val||"—")));meta.appendChild(s);}addSpan("Model",r.model);addSpan("Duration",(r.duration||"—")+"s");addSpan("Resolution",r.resolution);addSpan("Credits used",r.creditsCharged);addSpan("Remaining",r.creditsRemaining);}});
 document.getElementById("retry").onclick=function(){send("I want to pick a different frame");};
 })();</script></body></html>"""
 
