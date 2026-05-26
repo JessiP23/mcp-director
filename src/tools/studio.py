@@ -300,7 +300,7 @@ async def _render_with_inline_image(structured: dict[str, Any]) -> Any:
 
     Returns either:
       - the original dict unchanged (no URL, fetch failed, or oversize), OR
-      - a list `[ImageContent, TextContent(json)]` so MCP clients render
+      - a CallToolResult with ImageContent + TextContent so MCP clients render
         the image inline AND keep the structured fields (creditsRemaining,
         generationId, etc.) accessible to the agent.
     """
@@ -313,10 +313,14 @@ async def _render_with_inline_image(structured: dict[str, Any]) -> Any:
     if fetched is None:
         return structured
     data, mime = fetched
-    return [
+    content_blocks: list[Any] = [
         _image_content(data, mime),
         TextContent(type="text", text=json.dumps(structured, default=str)),
     ]
+    return CallToolResult(
+        content=content_blocks,
+        structuredContent=structured,
+    )
 
 
 async def _render_with_inline_images(

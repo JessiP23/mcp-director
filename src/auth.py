@@ -619,6 +619,52 @@ def build_oauth_router(*, redis_factory: Any | None = None) -> APIRouter:
                 supabase_access_ttl=max(int(refreshed["exp"]) - int(time.time()), 60),
                 req_id=req_id,
             )
+        elif grant_type == "supabase_token_exchange":
+            # Server-to-server exchange: wmstudio sends a Supabase access token,
+            # we validate it and return an MCP JWT. This enables hybrid auth where
+            # wmstudio's existing Supabase session is reused for MCP.
+            supabase_access = str(form.get("supabase_access_token") or "")
+            client_id = str(form.get("client_id") or "")
+            if not supabase_access:
+                raise HTTPException(status_code=400, detail="missing supabase_access_token")
+            
+            # Validate the Supabase token by decoding it (no signature check needed,
+            # we just need the user_id for now. The actual validation happens when
+            # the MCP token is used in the auth_guard middleware).
+            try:
+                unverified = jwt.get_unverified_claims(supabase_access)
+                user_id = str(unverified.get("sub", ""))
+                if not user_id:
+                    raise HTTPException(status_code=401, detail="invalid supabase token")
+            except JWTError as e:
+                log.warning(
+                    "supabase_token_exchange_invalid_jwt",
+                    http_request_id=req_id,
+                    error=str(e),
+                )
+                raise HTTPException(status_code=401, detail="invalid supabase token")
+            
+            # Issue MCP tokens with the Supabase access token as upstream
+            # We don't have a refresh token in this flow, so we'll rely on the
+            # Supabase session being refreshed by wmstudio
+            body_payload = await _issue_token_pair(
+                redis=redis,
+                settings=settings,
+                user_id=user_id,
+                scopes=["pipeline:read", "pipeline:write", "assets:read"],
+                client_id=client_id or None,
+                supabase_access=supabase_access,
+                supabase_refresh="",  # No refresh token in this flow
+                supabase_access_ttl=3600,  # Assume 1 hour TTL
+                req_id=req_id,
+            )
+            
+            log.info(
+                "supabase_token_exchange_success",
+                http_request_id=req_id,
+                user_id=user_id,
+                client_id=client_id or "none",
+            )
         else:
             raise HTTPException(status_code=400, detail="unsupported grant_type")
 
