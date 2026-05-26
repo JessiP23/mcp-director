@@ -15,6 +15,7 @@ from src.config import get_settings
 from src.middleware.auth_guard import AuthGuardMiddleware
 from src.resources.templates import register_resources
 from src.tools import assets, creative, insights, pipeline, studio
+from src.tools.registry import registry
 
 log = structlog.get_logger(__name__)
 
@@ -64,12 +65,26 @@ mcp = FastMCP(
     ],
 )
 
+# Register legacy tools (will be migrated to plugins gradually)
 pipeline.register(mcp)
 creative.register(mcp)
 assets.register(mcp)
 insights.register(mcp)
 studio.register(mcp)
 register_resources(mcp)
+
+# Discover and load plugins
+registry.discover_plugins()
+
+# Load and register plugin tools
+async def load_and_register_plugins():
+    """Load plugins and register their tools with MCP."""
+    # Load all discovered plugins
+    for plugin_name in list(registry._plugin_classes.keys()):
+        plugin = registry.load_plugin(plugin_name)
+        if plugin:
+            await plugin.register_tools(mcp)
+            log.info("plugin_tools_registered", plugin=plugin_name)
 
 mcp_app = mcp.http_app(
     path="/",
@@ -97,10 +112,16 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     app.state.redis = redis
     mcp_app.state.redis = redis
+    
+    # Load plugins on startup
+    await load_and_register_plugins()
+    
     try:
         async with mcp_app.router.lifespan_context(mcp_app):
             yield
     finally:
+        # Close plugins on shutdown
+        await registry.close_all()
         await redis.aclose()
 
 root_app = FastAPI(title="director-mcp", lifespan=_lifespan)
