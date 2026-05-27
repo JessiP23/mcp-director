@@ -6,3 +6,15 @@ Call telegram_get_updates (return data with updates)
 ## to get chat id
 first you need to find wmstudio_director_bot in telegram and send it a message
 then `call telegram_get_updates` to get the chat id
+
+## after collecting chat id 
+you can use it to send messages to the user
+
+Example:
+```
+Send a Telegram message to chat 6987189097 saying "Director live and testing"
+```
+image generation:
+```
+Generate a cinematic sunset still and send it to my Telegram chat 6987189097
+```
