@@ -3,8 +3,11 @@
 from typing import Any, Dict, Optional
 import os
 from fastmcp import FastMCP
+import httpx
+from fastmcp.server.dependencies import get_http_request
 
 from ..base import BasePlugin
+from src.config import get_settings
 
 
 class TelegramPlugin(BasePlugin):
@@ -19,6 +22,43 @@ class TelegramPlugin(BasePlugin):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         # Plugin is enabled by default, but individual users need tokens
         self.enabled = True
+        self.settings = get_settings()
+
+    async def get_user_token_from_supabase(self, user_id: str) -> Optional[str]:
+        """Fetch user's Telegram bot token from Supabase."""
+        try:
+            request = get_http_request()
+            user_token = getattr(request.state, "director_bearer_token", None)
+            if not user_token:
+                return None
+            async with httpx.AsyncClient() as client:
+                headers = {
+                    "apikey": self.settings.supabase_anon_key,
+                    "Authorization": f"Bearer {user_token}",
+                    "Content-Type": "application/json",
+                }
+                response = await client.get(
+                    f"{self.settings.supabase_url}/rest/v1/director_connector_oauth_tokens",
+                    headers=headers,
+                    params={
+                        "user_id": f"eq.{user_id}",
+                        "service": f"eq.telegram",
+                        "select": "access_token",
+                    },
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        return data[0].get("access_token")
+                else:
+                    print(f"Supabase query failed: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"Error fetching telegram token from Supabase: {e}")
+        return None
+
+    def _resolve_token(self) -> Optional[str]:
+        """Helper not used directly; tools resolve token via Supabase + env fallback."""
+        return self.bot_token
 
     async def register_tools(self, mcp: FastMCP) -> None:
         """Register Telegram tools with the MCP server."""
@@ -29,7 +69,6 @@ class TelegramPlugin(BasePlugin):
             chat_id: str,
             message: str,
             parse_mode: Optional[str] = None,
-            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Send a message via Telegram Bot API.
             
@@ -37,15 +76,13 @@ class TelegramPlugin(BasePlugin):
                 chat_id: Unique identifier for the target chat or username of the target channel
                 message: Text of the message to be sent
                 parse_mode: Optional parse mode (HTML, Markdown, MarkdownV2)
-                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with message_id, chat_id, and success status
             """
-            # Try user token first, fall back to env var
-            token = None
-            if user_id:
-                token = self.get_user_token(user_id)
+            request = get_http_request()
+            user_id = getattr(request.state, "user_id", None) if request else None
+            token = await self.get_user_token_from_supabase(user_id) if user_id else None
             if not token:
                 token = self.bot_token
             
@@ -95,18 +132,15 @@ class TelegramPlugin(BasePlugin):
 
         @mcp.tool(name="telegram_get_me")
         @self.with_circuit_breaker
-        async def telegram_get_me(user_id: Optional[str] = None) -> Dict[str, Any]:
+        async def telegram_get_me() -> Dict[str, Any]:
             """Get basic information about the bot.
-            
-            Args:
-                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with bot id, username, first_name, etc.
             """
-            token = None
-            if user_id:
-                token = self.get_user_token(user_id)
+            request = get_http_request()
+            user_id = getattr(request.state, "user_id", None) if request else None
+            token = await self.get_user_token_from_supabase(user_id) if user_id else None
             if not token:
                 token = self.bot_token
             
@@ -154,7 +188,6 @@ class TelegramPlugin(BasePlugin):
             offset: Optional[int] = None,
             limit: int = 100,
             timeout: int = 0,
-            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Get incoming updates using long polling.
             
@@ -162,14 +195,13 @@ class TelegramPlugin(BasePlugin):
                 offset: Identifier of the first update to be returned
                 limit: Limits the number of updates to be retrieved (1-100)
                 timeout: Timeout in seconds for long polling
-                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with list of updates
             """
-            token = None
-            if user_id:
-                token = self.get_user_token(user_id)
+            request = get_http_request()
+            user_id = getattr(request.state, "user_id", None) if request else None
+            token = await self.get_user_token_from_supabase(user_id) if user_id else None
             if not token:
                 token = self.bot_token
             
