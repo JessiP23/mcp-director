@@ -17,8 +17,7 @@ class SlackPlugin(BasePlugin):
         super().__init__()
         self.category = "communication"
         self.bot_token = os.getenv("SLACK_BOT_TOKEN")
-        if not self.bot_token:
-            self.enabled = False
+        self.enabled = True
 
     async def register_tools(self, mcp: FastMCP) -> None:
         """Register Slack tools with the MCP server."""
@@ -28,21 +27,29 @@ class SlackPlugin(BasePlugin):
         async def slack_send_message(
             channel: str,
             message: str,
+            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Send a message via Slack Web API.
             
             Args:
                 channel: Channel ID or name (e.g., "C1234567890" or "#general")
                 message: Text of the message to be sent
+                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with message timestamp, channel, and success status
             """
-            if not self.bot_token:
+            token = None
+            if user_id:
+                token = self.get_user_token(user_id)
+            if not token:
+                token = self.bot_token
+            
+            if not token:
                 return {
                     "ok": False,
                     "error": "slack_not_configured",
-                    "message": "SLACK_BOT_TOKEN environment variable is not set",
+                    "message": "Slack not configured. Please connect your Slack account.",
                 }
 
             try:
@@ -50,7 +57,7 @@ class SlackPlugin(BasePlugin):
                 url = "https://slack.com/api/chat.postMessage"
                 
                 headers = {
-                    "Authorization": f"Bearer {self.bot_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 }
                 
@@ -86,20 +93,28 @@ class SlackPlugin(BasePlugin):
         @self.with_circuit_breaker
         async def slack_get_channels(
             limit: int = 100,
+            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Get list of channels the bot has access to.
             
             Args:
                 limit: Maximum number of channels to return
+                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with list of channels
             """
-            if not self.bot_token:
+            token = None
+            if user_id:
+                token = self.get_user_token(user_id)
+            if not token:
+                token = self.bot_token
+            
+            if not token:
                 return {
                     "ok": False,
                     "error": "slack_not_configured",
-                    "message": "SLACK_BOT_TOKEN environment variable is not set",
+                    "message": "Slack not configured. Please connect your Slack account.",
                 }
 
             try:
@@ -107,7 +122,7 @@ class SlackPlugin(BasePlugin):
                 url = "https://slack.com/api/conversations.list"
                 
                 headers = {
-                    "Authorization": f"Bearer {self.bot_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 }
                 
@@ -142,20 +157,28 @@ class SlackPlugin(BasePlugin):
         @self.with_circuit_breaker
         async def slack_get_user_info(
             user: str,
+            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Get information about a user.
             
             Args:
                 user: User ID
+                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with user information
             """
-            if not self.bot_token:
+            token = None
+            if user_id:
+                token = self.get_user_token(user_id)
+            if not token:
+                token = self.bot_token
+            
+            if not token:
                 return {
                     "ok": False,
                     "error": "slack_not_configured",
-                    "message": "SLACK_BOT_TOKEN environment variable is not set",
+                    "message": "Slack not configured. Please connect your Slack account.",
                 }
 
             try:
@@ -163,7 +186,7 @@ class SlackPlugin(BasePlugin):
                 url = "https://slack.com/api/users.info"
                 
                 headers = {
-                    "Authorization": f"Bearer {self.bot_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 }
                 

@@ -21,8 +21,7 @@ class GmailPlugin(BasePlugin):
         self.category = "communication"
         self.api_key = os.getenv("GMAIL_API_KEY")
         self.access_token = os.getenv("GMAIL_ACCESS_TOKEN")
-        if not self.api_key and not self.access_token:
-            self.enabled = False
+        self.enabled = True
 
     async def register_tools(self, mcp: FastMCP) -> None:
         """Register Gmail tools with the MCP server."""
@@ -35,6 +34,7 @@ class GmailPlugin(BasePlugin):
             body: str,
             cc: Optional[str] = None,
             bcc: Optional[str] = None,
+            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Send an email via Gmail API.
             
@@ -44,15 +44,22 @@ class GmailPlugin(BasePlugin):
                 body: Email body (plain text)
                 cc: Optional CC recipient
                 bcc: Optional BCC recipient
+                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with message ID and success status
             """
-            if not self.access_token:
+            token = None
+            if user_id:
+                token = self.get_user_token(user_id)
+            if not token:
+                token = self.access_token
+            
+            if not token:
                 return {
                     "ok": False,
                     "error": "gmail_not_configured",
-                    "message": "GMAIL_ACCESS_TOKEN environment variable is not set",
+                    "message": "Gmail not configured. Please connect your Gmail account.",
                 }
 
             try:
@@ -74,7 +81,7 @@ class GmailPlugin(BasePlugin):
                 url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
                 
                 headers = {
-                    "Authorization": f"Bearer {self.access_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 }
                 
@@ -101,21 +108,29 @@ class GmailPlugin(BasePlugin):
         async def gmail_list_messages(
             max_results: int = 10,
             query: Optional[str] = None,
+            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """List Gmail messages.
             
             Args:
                 max_results: Maximum number of messages to return
                 query: Optional search query (Gmail search syntax)
+                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with list of messages
             """
-            if not self.access_token:
+            token = None
+            if user_id:
+                token = self.get_user_token(user_id)
+            if not token:
+                token = self.access_token
+            
+            if not token:
                 return {
                     "ok": False,
                     "error": "gmail_not_configured",
-                    "message": "GMAIL_ACCESS_TOKEN environment variable is not set",
+                    "message": "Gmail not configured. Please connect your Gmail account.",
                 }
 
             try:
@@ -123,7 +138,7 @@ class GmailPlugin(BasePlugin):
                 url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
                 
                 headers = {
-                    "Authorization": f"Bearer {self.access_token}",
+                    "Authorization": f"Bearer {token}",
                 }
                 
                 params = {"maxResults": max_results}
@@ -152,21 +167,29 @@ class GmailPlugin(BasePlugin):
         async def gmail_get_message(
             message_id: str,
             format: str = "metadata",
+            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Get a specific Gmail message.
             
             Args:
                 message_id: The ID of the message to retrieve
                 format: Format of the message (minimal, metadata, full, raw)
+                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with message details
             """
-            if not self.access_token:
+            token = None
+            if user_id:
+                token = self.get_user_token(user_id)
+            if not token:
+                token = self.access_token
+            
+            if not token:
                 return {
                     "ok": False,
                     "error": "gmail_not_configured",
-                    "message": "GMAIL_ACCESS_TOKEN environment variable is not set",
+                    "message": "Gmail not configured. Please connect your Gmail account.",
                 }
 
             try:
@@ -174,7 +197,7 @@ class GmailPlugin(BasePlugin):
                 url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}"
                 
                 headers = {
-                    "Authorization": f"Bearer {self.access_token}",
+                    "Authorization": f"Bearer {token}",
                 }
                 
                 params = {"format": format}
@@ -203,21 +226,29 @@ class GmailPlugin(BasePlugin):
         async def gmail_search_messages(
             query: str,
             max_results: int = 10,
+            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Search Gmail messages using Gmail search syntax.
             
             Args:
                 query: Gmail search query (e.g., "from:john@example.com", "subject:urgent")
                 max_results: Maximum number of messages to return
+                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with list of matching messages
             """
-            if not self.access_token:
+            token = None
+            if user_id:
+                token = self.get_user_token(user_id)
+            if not token:
+                token = self.access_token
+            
+            if not token:
                 return {
                     "ok": False,
                     "error": "gmail_not_configured",
-                    "message": "GMAIL_ACCESS_TOKEN environment variable is not set",
+                    "message": "Gmail not configured. Please connect your Gmail account.",
                 }
 
             try:
@@ -225,7 +256,7 @@ class GmailPlugin(BasePlugin):
                 url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
                 
                 headers = {
-                    "Authorization": f"Bearer {self.access_token}",
+                    "Authorization": f"Bearer {token}",
                 }
                 
                 params = {

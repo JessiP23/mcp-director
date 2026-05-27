@@ -71,6 +71,7 @@ class BasePlugin(ABC):
         self._circuit_breaker = CircuitBreaker()
         self.category: str = "general"
         self.enabled: bool = True
+        self._user_tokens: Dict[str, str] = {}  # user_id -> token
 
     @property
     @abstractmethod
@@ -146,3 +147,15 @@ class BasePlugin(ABC):
             "circuit_breaker_state": self._circuit_breaker.state,
             "failure_count": self._circuit_breaker.failure_count,
         }
+
+    def set_user_token(self, user_id: str, token: str) -> None:
+        """Set OAuth token for a specific user."""
+        self._user_tokens[user_id] = token
+
+    def get_user_token(self, user_id: str) -> Optional[str]:
+        """Get OAuth token for a specific user."""
+        return self._user_tokens.get(user_id)
+
+    def has_user_token(self, user_id: str) -> bool:
+        """Check if a user has a token set."""
+        return user_id in self._user_tokens
