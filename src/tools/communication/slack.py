@@ -3,8 +3,11 @@
 from typing import Any, Dict, Optional
 import os
 from fastmcp import FastMCP
+import httpx
+from fastmcp.server.dependencies import get_http_request
 
 from ..base import BasePlugin
+from src.config import get_settings
 
 
 class SlackPlugin(BasePlugin):
@@ -18,6 +21,43 @@ class SlackPlugin(BasePlugin):
         self.category = "communication"
         self.bot_token = os.getenv("SLACK_BOT_TOKEN")
         self.enabled = True
+        self.settings = get_settings()
+    
+    async def get_user_token_from_supabase(self, user_id: str) -> Optional[str]:
+        """Fetch user's Slack OAuth token from Supabase."""
+        try:
+            request = get_http_request()
+            # Use the user's Supabase access token from request state (set by auth_guard)
+            user_token = getattr(request.state, "director_bearer_token", None)
+            
+            if not user_token:
+                print("No user Supabase token available in request state")
+                return None
+            
+            async with httpx.AsyncClient() as client:
+                headers = {
+                    "apikey": self.settings.supabase_anon_key,
+                    "Authorization": f"Bearer {user_token}",
+                    "Content-Type": "application/json",
+                }
+                response = await client.get(
+                    f"{self.settings.supabase_url}/rest/v1/director_connector_oauth_tokens",
+                    headers=headers,
+                    params={
+                        "user_id": f"eq.{user_id}",
+                        "service": f"eq.slack",
+                        "select": "access_token",
+                    },
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        return data[0].get("access_token")
+                else:
+                    print(f"Supabase query failed: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"Error fetching token from Supabase: {e}")
+        return None
 
     async def register_tools(self, mcp: FastMCP) -> None:
         """Register Slack tools with the MCP server."""
@@ -37,8 +77,16 @@ class SlackPlugin(BasePlugin):
             Returns:
                 Dict with message timestamp, channel, and success status
             """
-            # Use bot token
-            token = self.bot_token
+            # Get user_id from request state (set by auth_guard middleware)
+            request = get_http_request()
+            user_id = getattr(request.state, "user_id", None) if request else None
+            
+            # Try to get user token from Supabase first
+            token = await self.get_user_token_from_supabase(user_id) if user_id else None
+            
+            # Fall back to bot token if user token not found
+            if not token:
+                token = self.bot_token
             
             if not token:
                 return {
