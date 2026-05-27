@@ -104,14 +104,45 @@ class SlackPlugin(BasePlugin):
                     "Content-Type": "application/json",
                 }
                 
+                target_channel = channel
+                if channel.startswith("#"):
+                    list_response = await client.get(
+                        "https://slack.com/api/conversations.list",
+                        params={
+                            "types": "public_channel,private_channel",
+                            "limit": 1000,
+                        },
+                        headers=headers,
+                    )
+                    list_response.raise_for_status()
+                    list_data = list_response.json()
+                    if list_data.get("ok"):
+                        channel_name = channel[1:]
+                        for item in list_data.get("channels", []):
+                            if item.get("name") == channel_name:
+                                target_channel = item.get("id", channel)
+                                break
+
                 payload = {
-                    "channel": channel,
+                    "channel": target_channel,
                     "text": message,
                 }
                 
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 data = response.json()
+                if data.get("error") == "not_in_channel":
+                    join_response = await client.post(
+                        "https://slack.com/api/conversations.join",
+                        json={"channel": target_channel},
+                        headers=headers,
+                    )
+                    join_response.raise_for_status()
+                    join_data = join_response.json()
+                    if join_data.get("ok") or join_data.get("error") == "already_in_channel":
+                        response = await client.post(url, json=payload, headers=headers)
+                        response.raise_for_status()
+                        data = response.json()
                 
                 if not data.get("ok"):
                     return {
