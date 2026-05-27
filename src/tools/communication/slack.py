@@ -27,23 +27,18 @@ class SlackPlugin(BasePlugin):
         async def slack_send_message(
             channel: str,
             message: str,
-            user_id: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Send a message via Slack Web API.
             
             Args:
                 channel: Channel ID or name (e.g., "C1234567890" or "#general")
                 message: Text of the message to be sent
-                user_id: User ID for fetching user-specific OAuth token
             
             Returns:
                 Dict with message timestamp, channel, and success status
             """
-            token = None
-            if user_id:
-                token = self.get_user_token(user_id)
-            if not token:
-                token = self.bot_token
+            # Use bot token
+            token = self.bot_token
             
             if not token:
                 return {
