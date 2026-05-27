@@ -130,6 +130,72 @@ class TelegramPlugin(BasePlugin):
                     "message": str(e),
                 }
 
+        @mcp.tool(name="telegram_send_photo")
+        @self.with_circuit_breaker
+        async def telegram_send_photo(
+            chat_id: str,
+            photo_url: str,
+            caption: Optional[str] = None,
+            parse_mode: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            """Send a generated photo/asset URL to a Telegram chat.
+            
+            Use this to share a generated image from WM Studio. The asset stays hosted
+            in WM Studio storage; Telegram fetches and renders the URL inline.
+            
+            Args:
+                chat_id: Target chat id or @channel_username
+                photo_url: Public HTTPS URL of the generated image
+                caption: Optional caption (0-1024 chars)
+                parse_mode: Optional parse mode (HTML, Markdown, MarkdownV2)
+            
+            Returns:
+                Dict with message_id, chat_id, and success status
+            """
+            request = get_http_request()
+            user_id = getattr(request.state, "user_id", None) if request else None
+            token = await self.get_user_token_from_supabase(user_id) if user_id else None
+            if not token:
+                token = self.bot_token
+            
+            if not token:
+                return {
+                    "ok": False,
+                    "error": "telegram_not_configured",
+                    "message": "Telegram not configured. Please connect your Telegram account.",
+                }
+
+            try:
+                client = await self.get_http_client()
+                url = f"https://api.telegram.org/bot{token}/sendPhoto"
+                payload: Dict[str, Any] = {"chat_id": chat_id, "photo": photo_url}
+                if caption:
+                    payload["caption"] = caption
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not data.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": "telegram_api_error",
+                        "description": data.get("description", "Unknown error"),
+                    }
+                result = data.get("result", {})
+                return {
+                    "ok": True,
+                    "message_id": result.get("message_id"),
+                    "chat_id": result.get("chat", {}).get("id"),
+                    "photo_url": photo_url,
+                }
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": "telegram_request_failed",
+                    "message": str(e),
+                }
+
         @mcp.tool(name="telegram_get_me")
         @self.with_circuit_breaker
         async def telegram_get_me() -> Dict[str, Any]:

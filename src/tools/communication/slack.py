@@ -59,6 +59,49 @@ class SlackPlugin(BasePlugin):
             print(f"Error fetching token from Supabase: {e}")
         return None
 
+    async def _get_active_token(self) -> Optional[str]:
+        request = get_http_request()
+        user_id = getattr(request.state, "user_id", None) if request else None
+        token = await self.get_user_token_from_supabase(user_id) if user_id else None
+        return token or self.bot_token
+
+    async def _resolve_channel_id(self, client, headers, channel: str) -> str:
+        if not channel.startswith("#"):
+            return channel
+        list_response = await client.get(
+            "https://slack.com/api/conversations.list",
+            params={"types": "public_channel,private_channel", "limit": 1000},
+            headers=headers,
+        )
+        list_response.raise_for_status()
+        list_data = list_response.json()
+        if not list_data.get("ok"):
+            return channel
+        target = channel[1:]
+        for item in list_data.get("channels", []):
+            if item.get("name") == target:
+                return item.get("id", channel)
+        return channel
+
+    async def _post_with_join_retry(self, client, headers, target_channel: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        url = "https://slack.com/api/chat.postMessage"
+        response = await client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("error") == "not_in_channel":
+            join_response = await client.post(
+                "https://slack.com/api/conversations.join",
+                json={"channel": target_channel},
+                headers=headers,
+            )
+            join_response.raise_for_status()
+            join_data = join_response.json()
+            if join_data.get("ok") or join_data.get("error") == "already_in_channel":
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+        return data
+
     async def register_tools(self, mcp: FastMCP) -> None:
         """Register Slack tools with the MCP server."""
         
@@ -97,71 +140,110 @@ class SlackPlugin(BasePlugin):
 
             try:
                 client = await self.get_http_client()
-                url = "https://slack.com/api/chat.postMessage"
-                
                 headers = {
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 }
-                
-                target_channel = channel
-                if channel.startswith("#"):
-                    list_response = await client.get(
-                        "https://slack.com/api/conversations.list",
-                        params={
-                            "types": "public_channel,private_channel",
-                            "limit": 1000,
-                        },
-                        headers=headers,
-                    )
-                    list_response.raise_for_status()
-                    list_data = list_response.json()
-                    if list_data.get("ok"):
-                        channel_name = channel[1:]
-                        for item in list_data.get("channels", []):
-                            if item.get("name") == channel_name:
-                                target_channel = item.get("id", channel)
-                                break
-
-                payload = {
-                    "channel": target_channel,
-                    "text": message,
-                }
-                
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-                if data.get("error") == "not_in_channel":
-                    join_response = await client.post(
-                        "https://slack.com/api/conversations.join",
-                        json={"channel": target_channel},
-                        headers=headers,
-                    )
-                    join_response.raise_for_status()
-                    join_data = join_response.json()
-                    if join_data.get("ok") or join_data.get("error") == "already_in_channel":
-                        response = await client.post(url, json=payload, headers=headers)
-                        response.raise_for_status()
-                        data = response.json()
-                
+                target_channel = await self._resolve_channel_id(client, headers, channel)
+                payload = {"channel": target_channel, "text": message}
+                data = await self._post_with_join_retry(client, headers, target_channel, payload)
                 if not data.get("ok"):
                     return {
                         "ok": False,
                         "error": "slack_api_error",
                         "description": data.get("error", "Unknown error"),
                     }
-                
+                return {"ok": True, "ts": data.get("ts"), "channel": data.get("channel")}
+            except Exception as e:
+                return {"ok": False, "error": "slack_request_failed", "message": str(e)}
+
+        @mcp.tool(name="slack_post_asset")
+        @self.with_circuit_breaker
+        async def slack_post_asset(
+            channel: str,
+            asset_url: str,
+            caption: Optional[str] = None,
+            alt_text: Optional[str] = None,
+            asset_type: str = "image",
+        ) -> Dict[str, Any]:
+            """Post a generated asset (image or video URL) to a Slack channel using Block Kit.
+            
+            Use this whenever you need to share a generated asset (image, upscale, brandshot, video) in Slack.
+            The asset stays hosted in WM Studio storage; Slack just renders the URL inline.
+            
+            Args:
+                channel: Channel ID or name (e.g., "C1234567890" or "#general")
+                asset_url: Public HTTPS URL of the generated asset
+                caption: Optional caption shown above the asset
+                alt_text: Optional accessibility text (defaults to caption or "Generated asset")
+                asset_type: "image" for still images, "video" for video links
+            
+            Returns:
+                Dict with message timestamp, channel, and success status
+            """
+            token = await self._get_active_token()
+            if not token:
+                return {
+                    "ok": False,
+                    "error": "slack_not_configured",
+                    "message": "Slack not configured. Please connect your Slack account.",
+                }
+
+            try:
+                client = await self.get_http_client()
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                }
+                target_channel = await self._resolve_channel_id(client, headers, channel)
+
+                fallback_text = caption or asset_url
+                blocks: list = []
+                if caption:
+                    blocks.append({
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": caption},
+                    })
+                if asset_type == "image":
+                    blocks.append({
+                        "type": "image",
+                        "image_url": asset_url,
+                        "alt_text": alt_text or caption or "Generated asset",
+                    })
+                else:
+                    blocks.append({
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"<{asset_url}|Open video>"},
+                    })
+                blocks.append({
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"Generated by WM Studio · <{asset_url}|source>"},
+                    ],
+                })
+
+                payload = {
+                    "channel": target_channel,
+                    "text": fallback_text,
+                    "blocks": blocks,
+                    "unfurl_links": True,
+                    "unfurl_media": True,
+                }
+                data = await self._post_with_join_retry(client, headers, target_channel, payload)
+                if not data.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": "slack_api_error",
+                        "description": data.get("error", "Unknown error"),
+                    }
                 return {
                     "ok": True,
                     "ts": data.get("ts"),
                     "channel": data.get("channel"),
+                    "asset_url": asset_url,
                 }
             except Exception as e:
-                return {
-                    "ok": False,
-                    "error": "slack_request_failed",
-                    "message": str(e),
-                }
+                return {"ok": False, "error": "slack_request_failed", "message": str(e)}
 
         @mcp.tool(name="slack_get_channels")
         @self.with_circuit_breaker
