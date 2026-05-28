@@ -1190,7 +1190,7 @@ def register(mcp: FastMCP) -> None:
                     # { queued: true, jobId, creditsCharged } and the URL
                     # only materializes after polling. Resolve here so the
                     # frame array always has a real imageUrl.
-                    resolved = await _resolve_generation_response(client, res, kind="image")
+                    resolved = await _resolve_generation_response(client, res, kind="image", director_run_id=directorRunId)
                     return {"ok": True, "index": idx, "result": resolved}
                 except InsufficientCreditsError as e:
                     return {"ok": False, "index": idx, "error": "insufficient_credits", "payload": e.payload}
@@ -1536,14 +1536,18 @@ def register(mcp: FastMCP) -> None:
             await client.aclose()
 
     @mcp.tool(name="studio_credits_balance")
-    async def studio_credits_balance() -> dict:
+    async def studio_credits_balance(
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
+    ) -> dict:
         """Return the authenticated user's credit balance.
 
         `{ balanceCredits, freeCredits, totalBalance, hasCredits }`.
         """
         client = _client()
         try:
-            return await client.credits_balance()
+            return await client.credits_balance(director_run_id=directorRunId)
         finally:
             await client.aclose()
 
