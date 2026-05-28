@@ -121,10 +121,58 @@ class AuthGuardMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         from fastmcp.server.context import _current_transport
+        import structlog
+
+        log = structlog.get_logger(__name__)
 
         if _current_transport.get() == "stdio":
             return await call_next(context)
         request = get_http_request()
+        
+        # Extract Director metadata from tool arguments and store in request.state
+        # The context has: copy, fastmcp_context, message, method, source, timestamp, type
+        message = getattr(context, "message", None)
+        log.info("on_call_tool_debug", message_type=type(message) if message else None)
+        
+        if message:
+            log.info("on_call_tool_message", message=str(message)[:500])
+            # Try to access arguments from the message
+            # The message is a CallToolRequestParams object with an arguments attribute
+            if hasattr(message, "arguments"):
+                arguments = message.arguments
+                log.info("on_call_tool_arguments", arguments=arguments)
+                if isinstance(arguments, dict):
+                    director_run_id = arguments.get("directorRunId")
+                    director_event_id = arguments.get("directorEventId")
+                    director_tool_name = arguments.get("directorToolName")
+                    log.info(
+                        "on_call_tool_director_metadata",
+                        director_run_id=director_run_id,
+                        director_event_id=director_event_id,
+                        director_tool_name=director_tool_name,
+                    )
+                    if director_run_id and director_event_id and director_tool_name:
+                        request.state.director_run_id = director_run_id
+                        request.state.director_event_id = director_event_id
+                        request.state.director_tool_name = director_tool_name
+            elif isinstance(message, dict):
+                arguments = message.get("params", {}).get("arguments", {})
+                log.info("on_call_tool_arguments_from_dict", arguments=arguments)
+                if isinstance(arguments, dict):
+                    director_run_id = arguments.get("directorRunId")
+                    director_event_id = arguments.get("directorEventId")
+                    director_tool_name = arguments.get("directorToolName")
+                    log.info(
+                        "on_call_tool_director_metadata",
+                        director_run_id=director_run_id,
+                        director_event_id=director_event_id,
+                        director_tool_name=director_tool_name,
+                    )
+                    if director_run_id and director_event_id and director_tool_name:
+                        request.state.director_run_id = director_run_id
+                        request.state.director_event_id = director_event_id
+                        request.state.director_tool_name = director_tool_name
+        
         redis = _redis_from_app_state(request)
         if redis:
             settings = get_settings()

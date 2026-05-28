@@ -140,8 +140,11 @@ class WMStudioClient:
         resp = await self._request("POST", "/api/creative-studio/upscale-video", json=payload)
         return self._parse(resp, "upscale_video")
 
-    async def get_job(self, job_id: str) -> dict[str, Any]:
-        resp = await self._request("GET", f"/api/jobs/{job_id}")
+    async def get_job(self, job_id: str, director_run_id: str | None = None) -> dict[str, Any]:
+        url = f"/api/jobs/{job_id}"
+        if director_run_id:
+            url += f"?directorRunId={director_run_id}"
+        resp = await self._request("GET", url)
         return self._parse(resp, "get_job")
 
     async def credits_balance(self) -> dict[str, Any]:

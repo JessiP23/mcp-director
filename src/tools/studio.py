@@ -68,6 +68,63 @@ def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
 
+def _extract_director_metadata(
+    directorRunId: str | None = None,
+    directorEventId: str | None = None,
+    directorToolName: str | None = None,
+) -> dict[str, Any]:
+    """Extract Director metadata from tool arguments and return it.
+    
+    The wmstudio production-agent injects directorRunId, directorEventId,
+    and directorToolName into studio tool calls. We need to forward these
+    to the wmstudio API so it can skip normal authentication.
+    """
+    import structlog
+    log = structlog.get_logger(__name__)
+    
+    # Also try to get from request context as fallback
+    try:
+        request = get_http_request()
+        if request:
+            # Check if Director metadata is in request state (set by middleware)
+            ctx_run_id = getattr(request.state, "director_run_id", None)
+            ctx_event_id = getattr(request.state, "director_event_id", None)
+            ctx_tool_name = getattr(request.state, "director_tool_name", None)
+            log.info(
+                "_extract_director_metadata_from_request_state",
+                ctx_run_id=ctx_run_id,
+                ctx_event_id=ctx_event_id,
+                ctx_tool_name=ctx_tool_name,
+            )
+            if ctx_run_id and ctx_event_id and ctx_tool_name:
+                log.info("_extract_director_metadata_success_from_state")
+                return {
+                    "directorRunId": ctx_run_id,
+                    "directorEventId": ctx_event_id,
+                    "directorToolName": ctx_tool_name,
+                }
+    except RuntimeError as e:
+        # No HTTP request context available
+        log.info("_extract_director_metadata_no_request_context", error=str(e))
+        pass
+    
+    log.info(
+        "_extract_director_metadata_from_params",
+        directorRunId=directorRunId,
+        directorEventId=directorEventId,
+        directorToolName=directorToolName,
+    )
+    if directorRunId and directorEventId and directorToolName:
+        log.info("_extract_director_metadata_success_from_params")
+        return {
+            "directorRunId": directorRunId,
+            "directorEventId": directorEventId,
+            "directorToolName": directorToolName,
+        }
+    log.info("_extract_director_metadata_empty")
+    return {}
+
+
 def _upload_required(asset_kind: str, param_name: str, reason: str = "missing") -> dict[str, Any]:
     """Return a structured "please upload" response when the caller has no
     public URL for an image/video. Claude can render `uploadUrl` as a link.
@@ -370,6 +427,7 @@ async def _run_billed(
     *args: Any,
     resolve_kind: str | None = None,
     extra_structured: dict[str, Any] | None = None,
+    director_run_id: str | None = None,
 ) -> Any:
     """Run a billed wmstudio operation with credit-aware error handling.
 
@@ -401,7 +459,7 @@ async def _run_billed(
         return result  # type: ignore[unreachable]
     if resolve_kind in ("image", "video"):
         try:
-            result = await _resolve_generation_response(client, result, kind=resolve_kind)
+            result = await _resolve_generation_response(client, result, kind=resolve_kind, director_run_id=director_run_id)
         except WMStudioClientError as e:
             # Polling failed/timed out — credits are already spent. Surface
             # jobId so the user can recover via studio_job_status, but do not
@@ -494,6 +552,7 @@ async def _resolve_queued_job(
     client: WMStudioClient,
     job_id: str,
     *,
+    director_run_id: str | None = None,
     timeout_s: float = 180.0,
     initial_wait_s: float = 2.0,
     max_wait_s: float = 8.0,
@@ -512,7 +571,7 @@ async def _resolve_queued_job(
     wait = initial_wait_s
     last: dict[str, Any] = {}
     while True:
-        snapshot = await client.get_job(job_id)
+        snapshot = await client.get_job(job_id, director_run_id=director_run_id)
         last = snapshot if isinstance(snapshot, dict) else {}
         status = last.get("status")
         if status in ("completed", "failed", "cancelled"):
@@ -539,6 +598,7 @@ async def _resolve_generation_response(
     raw: dict[str, Any],
     *,
     kind: str,
+    director_run_id: str | None = None,
     timeout_s: float = 180.0,
 ) -> dict[str, Any]:
     """Normalize an inline OR queued generate-* response into one with the
@@ -563,7 +623,7 @@ async def _resolve_generation_response(
     if not (is_queued and isinstance(job_id, str) and job_id):
         return raw  # nothing we can do — return as-is and let caller decide
 
-    snapshot = await _resolve_queued_job(client, job_id, timeout_s=timeout_s)
+    snapshot = await _resolve_queued_job(client, job_id, director_run_id=director_run_id, timeout_s=timeout_s)
     url = snapshot.get("resultUrl") or _extract_image_url(snapshot)
     merged = dict(raw)
     if isinstance(url, str) and url:
@@ -636,6 +696,9 @@ def register(mcp: FastMCP) -> None:
         negative_prompt: str | None = None,
         num_images: int | None = None,
         seed: int | None = None,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Generate an image with WM Studio via fal.ai.
 
@@ -684,6 +747,7 @@ def register(mcp: FastMCP) -> None:
 
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = _drop_none({
                 "prompt": prompt,
                 "model": resolved_model,
@@ -692,6 +756,7 @@ def register(mcp: FastMCP) -> None:
                 "negative_prompt": negative_prompt,
                 "num_images": num_images,
                 "seed": seed,
+                **director_metadata,
             })
             return await _preview_or_run(
                 client,
@@ -712,6 +777,9 @@ def register(mcp: FastMCP) -> None:
         topaz_model: str = "Standard V2",
         face_enhancement: bool = True,
         output_format: str = "jpeg",
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Upscale an existing image with Topaz.
 
@@ -733,6 +801,7 @@ def register(mcp: FastMCP) -> None:
             return gate
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = {
                 "model": model,
                 "imageUrl": image_url,
@@ -741,8 +810,12 @@ def register(mcp: FastMCP) -> None:
                 "face_enhancement": face_enhancement,
                 "output_format": output_format,
                 "prompt": "",  # required by route shape; ignored by upscale handlers
+                **director_metadata,
             }
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
+            import structlog
+            log = structlog.get_logger(__name__)
+            log.info("studio_upscale_image_payload", payload=payload)
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -753,6 +826,9 @@ def register(mcp: FastMCP) -> None:
         image_url: str | None = None,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Generate an image with an explicit cinematic camera angle.
 
@@ -769,12 +845,14 @@ def register(mcp: FastMCP) -> None:
             return gate
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = _drop_none({
                 "prompt": prompt,
                 "model": model,
                 "aspect_ratio": aspect_ratio,
                 "imageUrl": image_url,
                 "metadata": {"toolId": "camera_angles", "camera": camera},
+                **director_metadata,
             })
             return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
@@ -787,6 +865,9 @@ def register(mcp: FastMCP) -> None:
         brand_palette: list[str] | None = None,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Brand-consistent product/marketing shot.
 
@@ -803,6 +884,7 @@ def register(mcp: FastMCP) -> None:
             return gate
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             metadata: dict[str, Any] = {"toolId": "brandshot"}
             if brand_palette:
                 metadata["brandPalette"] = brand_palette
@@ -812,6 +894,7 @@ def register(mcp: FastMCP) -> None:
                 "aspect_ratio": aspect_ratio,
                 "imageUrl": product_image_url,
                 "metadata": metadata,
+                **director_metadata,
             })
             return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
@@ -824,6 +907,9 @@ def register(mcp: FastMCP) -> None:
         character_profile: dict[str, Any] | None = None,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Generate a character casting shot.
 
@@ -835,6 +921,7 @@ def register(mcp: FastMCP) -> None:
         """
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             metadata: dict[str, Any] = {
                 "toolId": "casting",
                 "characterName": character_name,
@@ -847,6 +934,7 @@ def register(mcp: FastMCP) -> None:
                 "model": model,
                 "aspect_ratio": aspect_ratio,
                 "metadata": metadata,
+                **director_metadata,
             })
             return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
@@ -859,6 +947,9 @@ def register(mcp: FastMCP) -> None:
         enhancement_preset: str | None = None,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Generate a portrait using the user's trained Digital Twin LoRA.
 
@@ -868,6 +959,7 @@ def register(mcp: FastMCP) -> None:
         """
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = _drop_none({
                 "prompt": prompt,
                 "model": model,
@@ -875,6 +967,7 @@ def register(mcp: FastMCP) -> None:
                 "useDigitalTwin": True,
                 "digitalTwinProfileId": digital_twin_profile_id,
                 "digitalTwinEnhancementPreset": enhancement_preset,
+                **director_metadata,
             })
             return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
@@ -887,6 +980,9 @@ def register(mcp: FastMCP) -> None:
         room_style: str | None = None,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """UGC-style room scene with product placement.
 
@@ -904,6 +1000,7 @@ def register(mcp: FastMCP) -> None:
             return gate
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             metadata: dict[str, Any] = {"toolId": "ugc_room"}
             if room_style:
                 metadata["roomStyle"] = room_style
@@ -913,6 +1010,7 @@ def register(mcp: FastMCP) -> None:
                 "aspect_ratio": aspect_ratio,
                 "imageUrl": product_image_url,
                 "metadata": metadata,
+                **director_metadata,
             })
             return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
@@ -922,6 +1020,9 @@ def register(mcp: FastMCP) -> None:
     async def studio_convert_to_3d(
         image_url: str | None = None,
         model: str = "fal-ai/meshy/v6/image-to-3d",
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Convert a 2D image into a 3D GLB model (Meshy v6 by default).
 
@@ -938,11 +1039,13 @@ def register(mcp: FastMCP) -> None:
             return gate
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = {
                 "model": model,
                 "imageUrl": image_url,
                 "prompt": "",
                 "metadata": {"toolId": "convert_to_3d", "is3D": True},
+                **director_metadata,
             }
             return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
         finally:
@@ -962,6 +1065,9 @@ def register(mcp: FastMCP) -> None:
         model: str | None = None,
         negative_prompt: str | None = None,
         seed: int | None = None,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Generate N image FRAME CANDIDATES for the user to choose from
         before running a video generation.
@@ -1022,11 +1128,13 @@ def register(mcp: FastMCP) -> None:
 
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             single_payload = _drop_none({
                 "prompt": prompt,
                 "model": resolved_model,
                 "aspect_ratio": aspect_ratio,
                 "negative_prompt": negative_prompt,
+                **director_metadata,
             })
 
             if not confirm:
@@ -1223,6 +1331,9 @@ def register(mcp: FastMCP) -> None:
         duration: int | None = None,
         resolution: str | None = None,
         allow_text_to_video: bool = False,
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Generate a video from a chosen still frame (image-to-video).
 
@@ -1276,10 +1387,12 @@ def register(mcp: FastMCP) -> None:
             return gate
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = _drop_none({
                 "prompt": prompt,
                 "model": model,
                 "imageUrl": image_url,
+                **director_metadata,
                 "aspect_ratio": aspect_ratio,
                 "duration": duration,
                 "resolution": resolution,
@@ -1310,6 +1423,9 @@ def register(mcp: FastMCP) -> None:
         upscale_factor: int = 2,
         target_fps: int | None = None,
         model: str = "fal-ai/topaz/upscale/video",
+        directorRunId: str | None = None,
+        directorEventId: str | None = None,
+        directorToolName: str | None = None,
     ) -> dict:
         """Upscale and optionally re-time a video via Topaz Video AI.
 
@@ -1322,11 +1438,13 @@ def register(mcp: FastMCP) -> None:
             return gate
         client = _client()
         try:
+            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = _drop_none({
                 "model": model,
                 "videoUrl": video_url,
                 "upscale_factor": upscale_factor,
                 "target_fps": target_fps,
+                **director_metadata,
             })
             return await _run_billed(client, client.upscale_video, payload)
         finally:
