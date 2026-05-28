@@ -237,6 +237,7 @@ async def _preview_or_run(
     operation_label: str,
     resolve_kind: str | None = None,
     extra_structured: dict[str, Any] | None = None,
+    director_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Two-phase confirmation pattern for billed operations.
 
@@ -251,7 +252,7 @@ async def _preview_or_run(
     agent can read aloud verbatim.
     """
     if confirm:
-        return await _run_billed(client, op, payload, resolve_kind=resolve_kind, extra_structured=extra_structured)
+        return await _run_billed(client, op, payload, resolve_kind=resolve_kind, extra_structured=extra_structured, director_run_id=director_run_id)
 
     try:
         estimate = await client.estimate_pricing(payload)
@@ -765,6 +766,7 @@ def register(mcp: FastMCP) -> None:
                 confirm=confirm,
                 operation_label=f"image generation · {resolved_model}",
                 resolve_kind="image",
+                director_run_id=directorRunId,
             )
         finally:
             await client.aclose()
@@ -854,7 +856,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": {"toolId": "camera_angles", "camera": camera},
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -896,7 +898,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -936,7 +938,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -969,7 +971,7 @@ def register(mcp: FastMCP) -> None:
                 "digitalTwinEnhancementPreset": enhancement_preset,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -1012,7 +1014,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -1047,7 +1049,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": {"toolId": "convert_to_3d", "is3D": True},
                 **director_metadata,
             }
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image")
+            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -1413,6 +1415,7 @@ def register(mcp: FastMCP) -> None:
                     "duration": duration,
                     "resolution": resolution,
                 }),
+                director_run_id=directorRunId,
             )
         finally:
             await client.aclose()

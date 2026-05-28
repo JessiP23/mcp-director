@@ -144,7 +144,21 @@ class WMStudioClient:
         url = f"/api/jobs/{job_id}"
         if director_run_id:
             url += f"?directorRunId={director_run_id}"
-        resp = await self._request("GET", url)
+        # For Director requests, override all headers to exclude Authorization
+        if director_run_id:
+            log.info("get_job Director request", job_id=job_id, director_run_id=director_run_id, url=url)
+            resp = await self._client.request(
+                "GET", 
+                url, 
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "mcp-director/studio-tools",
+                }
+            )
+            log.info("get_job Director response", status=resp.status_code)
+        else:
+            resp = await self._request("GET", url)
         return self._parse(resp, "get_job")
 
     async def credits_balance(self) -> dict[str, Any]:
