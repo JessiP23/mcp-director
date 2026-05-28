@@ -14,7 +14,7 @@ from src.auth import build_oauth_router, validate_mcp_token
 from src.config import get_settings
 from src.middleware.auth_guard import AuthGuardMiddleware
 from src.resources.templates import register_resources
-from src.tools import assets, creative, insights, pipeline, studio, reference_descriptions
+from src.tools import assets, creative, insights, pipeline, studio, brief, reference_descriptions
 from src.tools.registry import registry
 
 log = structlog.get_logger(__name__)
@@ -71,6 +71,7 @@ creative.register(mcp)
 assets.register(mcp)
 insights.register(mcp)
 studio.register(mcp)
+brief.register(mcp)
 reference_descriptions.register(mcp)
 register_resources(mcp)
 
