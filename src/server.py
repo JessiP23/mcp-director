@@ -232,4 +232,50 @@ async def director_webhook(request: Request):
     _ = await request.body()
     return JSONResponse({"received": True})
 
+
+@root_app.post("/api/director/cancel")
+async def cancel_director_run(request: Request):
+    """Cancel a Director run and stop any ongoing MCP tool executions."""
+    try:
+        body = await request.json()
+        director_run_id = body.get("directorRunId")
+        if not director_run_id:
+            return JSONResponse({"error": "directorRunId required"}, status_code=400)
+
+        redis = getattr(root_app.state, "redis", None)
+        if not redis:
+            log.error("cancel_director_run_no_redis")
+            return JSONResponse({"error": "Redis not available"}, status_code=500)
+
+        # Mark the run as cancelled in Redis
+        key = f"cancelled_director_run:{director_run_id}"
+        await redis.set(key, "1", ex=3600)  # Expire after 1 hour
+        log.info("director_run_cancelled", director_run_id=director_run_id)
+
+        return JSONResponse({"ok": True, "directorRunId": director_run_id})
+    except Exception as e:
+        log.error("cancel_director_run_failed", error=str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@root_app.get("/api/director/status/{director_run_id}")
+async def get_director_run_status(director_run_id: str, request: Request):
+    """Check if a Director run is cancelled."""
+    try:
+        redis = getattr(root_app.state, "redis", None)
+        if not redis:
+            return JSONResponse({"error": "Redis not available"}, status_code=500)
+
+        key = f"cancelled_director_run:{director_run_id}"
+        is_cancelled = await redis.exists(key)
+
+        return JSONResponse({
+            "directorRunId": director_run_id,
+            "cancelled": bool(is_cancelled)
+        })
+    except Exception as e:
+        log.error("get_director_run_status_failed", error=str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 root_app.mount("/mcp", mcp_app)

@@ -68,20 +68,65 @@ def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
 
+def _clean_false_params(d: dict[str, Any]) -> dict[str, Any]:
+    """Convert False values to None for optional string parameters.
+    
+    This handles cases where the LLM passes False for optional parameters
+    instead of omitting them, which causes Pydantic validation errors.
+    """
+    result = {}
+    for k, v in d.items():
+        # Convert False to None for common optional parameters
+        if v is False and k in ["model", "image_url", "negative_prompt", "seed", "aspect_ratio", "duration", "resolution"]:
+            result[k] = None
+        else:
+            result[k] = v
+    return result
+
+
+async def _is_director_run_cancelled(director_run_id: str) -> bool:
+    """Check if a Director run has been cancelled via the MCP server."""
+    try:
+        from fastmcp.server.dependencies import get_http_request
+        request = get_http_request()
+        if not request:
+            return False
+
+        # Access Redis from app state
+        from fastapi import Request
+        app = request.scope.get("app")
+        if not app:
+            return False
+
+        redis = getattr(app.state, "redis", None)
+        if not redis:
+            log.warning("_is_director_run_cancelled_no_redis")
+            return False
+
+        key = f"cancelled_director_run:{director_run_id}"
+        is_cancelled = await redis.exists(key)
+        if is_cancelled:
+            log.info("_is_director_run_cancelled_true", director_run_id=director_run_id)
+        return bool(is_cancelled)
+    except Exception as e:
+        log.warning("_is_director_run_cancelled_failed", error=str(e))
+        return False
+
+
 def _extract_director_metadata(
     directorRunId: str | None = None,
     directorEventId: str | None = None,
     directorToolName: str | None = None,
 ) -> dict[str, Any]:
     """Extract Director metadata from tool arguments and return it.
-    
+
     The wmstudio production-agent injects directorRunId, directorEventId,
     and directorToolName into studio tool calls. We need to forward these
     to the wmstudio API so it can skip normal authentication.
     """
     import structlog
     log = structlog.get_logger(__name__)
-    
+
     # Also try to get from request context as fallback
     try:
         request = get_http_request()
@@ -107,7 +152,7 @@ def _extract_director_metadata(
         # No HTTP request context available
         log.info("_extract_director_metadata_no_request_context", error=str(e))
         pass
-    
+
     log.info(
         "_extract_director_metadata_from_params",
         directorRunId=directorRunId,
@@ -251,6 +296,16 @@ async def _preview_or_run(
     The preview includes `requiresConfirmation: True` and a `message` the
     agent can read aloud verbatim.
     """
+    # Check if the Director run has been cancelled before executing
+    if director_run_id and await _is_director_run_cancelled(director_run_id):
+        log.info("_preview_or_run_cancelled", director_run_id=director_run_id)
+        return {
+            "ok": False,
+            "error": "cancelled",
+            "message": "Director run was cancelled by the user",
+            "directorRunId": director_run_id,
+        }
+
     if confirm:
         return await _run_billed(client, op, payload, resolve_kind=resolve_kind, extra_structured=extra_structured, director_run_id=director_run_id)
 
@@ -448,8 +503,29 @@ async def _run_billed(
     add a markdown link block. On any rendering failure we transparently
     fall back to the plain structured dict so the tool stays robust.
     """
+    # Check if the Director run has been cancelled before executing
+    if director_run_id and await _is_director_run_cancelled(director_run_id):
+        log.info("_run_billed_cancelled", director_run_id=director_run_id)
+        return {
+            "ok": False,
+            "error": "cancelled",
+            "message": "Director run was cancelled by the user",
+            "directorRunId": director_run_id,
+        }
+
     try:
         result = await op(*args)
+    except WMStudioClientError as e:
+        # Check if this is a cancellation error
+        if e.status_code == 499 and isinstance(e.payload, dict) and e.payload.get("cancelled"):
+            log.info("_run_billed_cancelled_during_execution", director_run_id=director_run_id)
+            return {
+                "ok": False,
+                "error": "cancelled",
+                "message": "Director run was cancelled by the user",
+                "directorRunId": director_run_id,
+            }
+        raise
     except InsufficientCreditsError as e:
         log.info(
             "studio_tool_insufficient_credits",
@@ -572,6 +648,15 @@ async def _resolve_queued_job(
     wait = initial_wait_s
     last: dict[str, Any] = {}
     while True:
+        # Check if the Director run has been cancelled
+        if director_run_id and await _is_director_run_cancelled(director_run_id):
+            log.info("_resolve_queued_job_cancelled", director_run_id=director_run_id, job_id=job_id)
+            raise WMStudioClientError(
+                499,
+                "Director run was cancelled by the user",
+                payload={"cancelled": True, "directorRunId": director_run_id, "jobId": job_id},
+            )
+
         snapshot = await client.get_job(job_id, director_run_id=director_run_id)
         last = snapshot if isinstance(snapshot, dict) else {}
         status = last.get("status")
@@ -726,6 +811,18 @@ def register(mcp: FastMCP) -> None:
         If `image_url` is provided it MUST be a real URL the user gave you;
         never fabricate one.
         """
+        # Clean up False values that should be None (happens after cancellation)
+        if model is False:
+            model = None
+        if image_url is False:
+            image_url = None
+        if negative_prompt is False:
+            negative_prompt = None
+        if seed is False:
+            seed = None
+        if aspect_ratio is False:
+            aspect_ratio = None
+
         if not aspect_ratio or ":" not in aspect_ratio:
             return {
                 "ok": False,
@@ -921,6 +1018,16 @@ def register(mcp: FastMCP) -> None:
         outfitStyle, outfitDetails, cinematicGenre, characterArchetype,
         eraSetting`. All optional; the route sanitizes unknown keys.
         """
+        # Check if the Director run has been cancelled before executing
+        if directorRunId and await _is_director_run_cancelled(directorRunId):
+            log.info("studio_casting_cancelled", director_run_id=directorRunId)
+            return {
+                "ok": False,
+                "error": "cancelled",
+                "message": "Director run was cancelled by the user",
+                "directorRunId": directorRunId,
+            }
+
         client = _client()
         try:
             director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
