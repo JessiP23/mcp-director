@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 import structlog
@@ -33,6 +33,99 @@ from src.wmstudio_client import (
 )
 
 log = structlog.get_logger(__name__)
+
+
+def _wmstudio_base_url() -> str:
+    settings = get_settings()
+    return settings.wmstudio_api_url.rstrip("/")
+
+
+async def _update_brief_after_generation(
+    tool_name: str,
+    prompt: str,
+    result: dict[str, Any],
+    director_run_id: str | None = None,
+) -> None:
+    """Update the production brief after a successful generation.
+
+    This is called automatically after studio tool generations to keep
+    the brief in sync with what's being created. Errors are logged but
+    don't fail the generation flow.
+    """
+    if not director_run_id:
+        return
+
+    try:
+        # Extract key information from the result
+        brief_update: dict[str, Any] = {
+            "reason": f"Generated content via {tool_name}",
+        }
+
+        # Add tool-specific information to brief sections
+        if tool_name == "studio_casting":
+            character_name = result.get("userPrompt", "Unknown character")
+            brief_update["sections"] = {
+                "characters": {character_name: prompt}
+            }
+        elif tool_name == "studio_generate_image":
+            brief_update["sections"] = {
+                "visualLanguage": f"Generated image: {prompt[:200]}"
+            }
+        elif tool_name == "studio_camera_angles":
+            brief_update["sections"] = {
+                "visualLanguage": f"Camera angles: {prompt[:200]}"
+            }
+        elif tool_name == "studio_brandshot":
+            brief_update["sections"] = {
+                "visualLanguage": f"Brandshot: {prompt[:200]}"
+            }
+        elif tool_name == "studio_digital_twin":
+            brief_update["sections"] = {
+                "visualLanguage": f"Digital twin: {prompt[:200]}"
+            }
+        elif tool_name == "studio_ugc_room":
+            brief_update["sections"] = {
+                "locations": {f"UGC room: {prompt[:100]}": prompt}
+            }
+
+        # Make async HTTP request to brief API
+        url = f"{_wmstudio_base_url()}/api/director/{director_run_id}/brief"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = await client.patch(
+                url,
+                json={
+                    "directorRunId": director_run_id,
+                    **brief_update,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "mcp-director/studio-tools",
+                },
+            )
+            if resp.status_code >= 400:
+                log.warning(
+                    "brief_update_after_generation_failed",
+                    tool=tool_name,
+                    director_run_id=director_run_id,
+                    status=resp.status_code,
+                    response_body=(resp.text or "")[:200],
+                )
+            else:
+                log.info(
+                    "brief_update_after_generation_success",
+                    tool=tool_name,
+                    director_run_id=director_run_id,
+                    response_body=(resp.text or "")[:200],
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            "brief_update_after_generation_error",
+            tool=tool_name,
+            director_run_id=director_run_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
 
 def _client() -> WMStudioClient:
@@ -861,7 +954,7 @@ def register(mcp: FastMCP) -> None:
                 "seed": seed,
                 **director_metadata,
             })
-            return await _preview_or_run(
+            result = await _preview_or_run(
                 client,
                 client.generate_image,
                 payload,
@@ -870,6 +963,19 @@ def register(mcp: FastMCP) -> None:
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
+            # Update brief after successful generation (fire-and-forget)
+            # result can be dict or CallToolResult, handle both
+            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
+            if result_dict.get("ok") is not False and not result_dict.get("preview"):
+                asyncio.create_task(
+                    _update_brief_after_generation(
+                        "studio_generate_image",
+                        prompt,
+                        result_dict,
+                        directorRunId,
+                    )
+                )
+            return result
         finally:
             await client.aclose()
 
@@ -967,7 +1073,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": {"toolId": "camera_angles", "camera": camera},
                 **director_metadata,
             })
-            return await _preview_or_run(
+            result = await _preview_or_run(
                 client,
                 client.generate_image,
                 payload,
@@ -976,6 +1082,19 @@ def register(mcp: FastMCP) -> None:
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
+            # Update brief after successful generation (fire-and-forget)
+            # result can be dict or CallToolResult, handle both
+            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
+            if result_dict.get("ok") is not False and not result_dict.get("preview"):
+                asyncio.create_task(
+                    _update_brief_after_generation(
+                        "studio_camera_angles",
+                        prompt,
+                        result_dict,
+                        directorRunId,
+                    )
+                )
+            return result
         finally:
             await client.aclose()
 
@@ -1026,7 +1145,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _preview_or_run(
+            result = await _preview_or_run(
                 client,
                 client.generate_image,
                 payload,
@@ -1035,6 +1154,19 @@ def register(mcp: FastMCP) -> None:
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
+            # Update brief after successful generation (fire-and-forget)
+            # result can be dict or CallToolResult, handle both
+            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
+            if result_dict.get("ok") is not False and not result_dict.get("preview"):
+                asyncio.create_task(
+                    _update_brief_after_generation(
+                        "studio_brandshot",
+                        prompt,
+                        result_dict,
+                        directorRunId,
+                    )
+                )
+            return result
         finally:
             await client.aclose()
 
@@ -1042,7 +1174,7 @@ def register(mcp: FastMCP) -> None:
     async def studio_casting(
         character_name: str,
         prompt: str,
-        character_profile: dict[str, Any] | str | None = None,
+        character_profile: Optional[dict[str, Any] | str] = None,
         confirm: bool = False,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
@@ -1109,7 +1241,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _preview_or_run(
+            result = await _preview_or_run(
                 client,
                 client.generate_image,
                 payload,
@@ -1118,6 +1250,19 @@ def register(mcp: FastMCP) -> None:
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
+            # Update brief after successful generation (fire-and-forget)
+            # result can be dict or CallToolResult, handle both
+            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
+            if result_dict.get("ok") is not False and not result_dict.get("preview"):
+                asyncio.create_task(
+                    _update_brief_after_generation(
+                        "studio_casting",
+                        prompt,
+                        result_dict,
+                        directorRunId,
+                    )
+                )
+            return result
         finally:
             await client.aclose()
 
@@ -1159,7 +1304,7 @@ def register(mcp: FastMCP) -> None:
                 "digitalTwinEnhancementPreset": enhancement_preset,
                 **director_metadata,
             })
-            return await _preview_or_run(
+            result = await _preview_or_run(
                 client,
                 client.generate_image,
                 payload,
@@ -1168,6 +1313,19 @@ def register(mcp: FastMCP) -> None:
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
+            # Update brief after successful generation (fire-and-forget)
+            # result can be dict or CallToolResult, handle both
+            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
+            if result_dict.get("ok") is not False and not result_dict.get("preview"):
+                asyncio.create_task(
+                    _update_brief_after_generation(
+                        "studio_digital_twin",
+                        prompt,
+                        result_dict,
+                        directorRunId,
+                    )
+                )
+            return result
         finally:
             await client.aclose()
 
@@ -1219,7 +1377,7 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _preview_or_run(
+            result = await _preview_or_run(
                 client,
                 client.generate_image,
                 payload,
@@ -1228,6 +1386,19 @@ def register(mcp: FastMCP) -> None:
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
+            # Update brief after successful generation (fire-and-forget)
+            # result can be dict or CallToolResult, handle both
+            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
+            if result_dict.get("ok") is not False and not result_dict.get("preview"):
+                asyncio.create_task(
+                    _update_brief_after_generation(
+                        "studio_ugc_room",
+                        prompt,
+                        result_dict,
+                        directorRunId,
+                    )
+                )
+            return result
         finally:
             await client.aclose()
 
