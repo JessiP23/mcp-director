@@ -116,7 +116,6 @@ def main() -> int:
         "studio_generate_video",
         "studio_upscale_image",
         "studio_video_enhance",
-        "studio_camera_angles",
         "studio_brandshot",
         "studio_casting",
         "studio_digital_twin",

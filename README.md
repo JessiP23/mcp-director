@@ -268,4 +268,4 @@ Operator details: **[docs/oauth-fly-supabase-runbook.md](docs/oauth-fly-supabase
 npx @modelcontextprotocol/inspector http://localhost:8080/mcp
 
 ## Command to run the bakckend
-- uvicorn src.server:root_app --host 0.0.0.0 --port 8080
+- python -m uvicorn src.server:root_app --host 0.0.0.0 --port 8080 --reload

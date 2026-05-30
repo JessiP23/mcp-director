@@ -901,8 +901,8 @@ def register(mcp: FastMCP) -> None:
              actually generate the image. NEVER set `confirm=True` on your
              own initiative.
 
-        Defaults to `fal-ai/nano-banana-pro` (text-to-image), auto-switching
-        to `fal-ai/nano-banana-pro/edit` when `image_url` is provided.
+        Defaults to `openai/gpt-image-2` (general purpose/typography), auto-switching
+        to `openai/gpt-image-2/edit` when `image_url` is provided.
         Returns `{ imageUrl, images, generationId, requestId, creditsCharged,
         creditsRemaining }` on success.
 
@@ -938,8 +938,12 @@ def register(mcp: FastMCP) -> None:
 
         # Default model: edit variant for img2img, base variant for t2i.
         resolved_model = model or (
-            "fal-ai/nano-banana-pro/edit" if image_url else "fal-ai/nano-banana-pro"
+            "openai/gpt-image-2/edit" if image_url else "openai/gpt-image-2"
         )
+
+        import structlog
+        log = structlog.get_logger(__name__)
+        log.info("studio_generate_image_model_used", model=resolved_model, image_url=image_url)
 
         client = _client()
         try:
@@ -1029,154 +1033,13 @@ def register(mcp: FastMCP) -> None:
         finally:
             await client.aclose()
 
-    @mcp.tool(name="studio_camera_angles")
-    async def studio_camera_angles(
-        prompt: str,
-        camera: str,
-        image_url: str | None = None,
-        confirm: bool = False,
-        model: str = "fal-ai/flux/dev",
-        aspect_ratio: str | None = None,
-        directorRunId: str | None = None,
-        directorEventId: str | None = None,
-        directorToolName: str | None = None,
-    ) -> dict:
-        """Generate an image with an explicit cinematic camera angle.
-
-        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
-          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
-             `preview` with `estimatedCredits`. Show that cost to the user
-             verbatim and ASK: "You are going to spend X credits. Proceed?".
-          2. Only AFTER the user agrees, re-call with `confirm=True` to
-             actually generate the image. NEVER set `confirm=True` on your
-             own initiative.
-
-        `camera` is a free-form descriptor (e.g. "low angle", "dutch tilt",
-        "over-the-shoulder"). The WM Studio prompt-engineer composes the
-        final prompt downstream.
-
-        IMPORTANT: This tool conditions on a reference image. `image_url`
-        MUST be a real URL. If the user hasn't provided one, omit it to
-        receive the upload link to share with them — NEVER fabricate URLs.
-        """
-        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=True)
-        if gate:
-            return gate
-        client = _client()
-        try:
-            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
-            payload = _drop_none({
-                "prompt": prompt,
-                "model": model,
-                "aspect_ratio": aspect_ratio,
-                "imageUrl": image_url,
-                "metadata": {"toolId": "camera_angles", "camera": camera},
-                **director_metadata,
-            })
-            result = await _preview_or_run(
-                client,
-                client.generate_image,
-                payload,
-                confirm=confirm,
-                operation_label=f"camera angles · {model}",
-                resolve_kind="image",
-                director_run_id=directorRunId,
-            )
-            # Update brief after successful generation (fire-and-forget)
-            # result can be dict or CallToolResult, handle both
-            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
-            if result_dict.get("ok") is not False and not result_dict.get("preview"):
-                asyncio.create_task(
-                    _update_brief_after_generation(
-                        "studio_camera_angles",
-                        prompt,
-                        result_dict,
-                        directorRunId,
-                    )
-                )
-            return result
-        finally:
-            await client.aclose()
-
-    @mcp.tool(name="studio_brandshot")
-    async def studio_brandshot(
-        prompt: str,
-        product_image_url: str | None = None,
-        brand_palette: list[str] | None = None,
-        confirm: bool = False,
-        model: str = "fal-ai/flux/dev",
-        aspect_ratio: str | None = None,
-        directorRunId: str | None = None,
-        directorEventId: str | None = None,
-        directorToolName: str | None = None,
-    ) -> dict:
-        """Brand-consistent product/marketing shot.
-
-        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
-          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
-             `preview` with `estimatedCredits`. Show that cost to the user
-             verbatim and ASK: "You are going to spend X credits. Proceed?".
-          2. Only AFTER the user agrees, re-call with `confirm=True` to
-             actually generate the image. NEVER set `confirm=True` on your
-             own initiative.
-
-        Pass the product image and an optional brand color palette (hex
-        strings). IMPORTANT: `product_image_url` MUST be a real URL the
-        user gave you. NEVER fabricate URLs — if the user has not provided
-        one, omit `product_image_url` to receive the upload link to give
-        them.
-        """
-        gate = await _gate_asset_url(
-            product_image_url, asset_kind="image", param="product_image_url", required=True
-        )
-        if gate:
-            return gate
-        client = _client()
-        try:
-            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
-            metadata: dict[str, Any] = {"toolId": "brandshot"}
-            if brand_palette:
-                metadata["brandPalette"] = brand_palette
-            payload = _drop_none({
-                "prompt": prompt,
-                "model": model,
-                "aspect_ratio": aspect_ratio,
-                "imageUrl": product_image_url,
-                "metadata": metadata,
-                **director_metadata,
-            })
-            result = await _preview_or_run(
-                client,
-                client.generate_image,
-                payload,
-                confirm=confirm,
-                operation_label=f"brandshot · {model}",
-                resolve_kind="image",
-                director_run_id=directorRunId,
-            )
-            # Update brief after successful generation (fire-and-forget)
-            # result can be dict or CallToolResult, handle both
-            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
-            if result_dict.get("ok") is not False and not result_dict.get("preview"):
-                asyncio.create_task(
-                    _update_brief_after_generation(
-                        "studio_brandshot",
-                        prompt,
-                        result_dict,
-                        directorRunId,
-                    )
-                )
-            return result
-        finally:
-            await client.aclose()
-
     @mcp.tool(name="studio_casting")
     async def studio_casting(
         character_name: str,
         prompt: str,
         character_profile: Optional[dict[str, Any] | str] = None,
         confirm: bool = False,
-        model: str = "fal-ai/flux/dev",
+        model: str = "fal-ai/nano-banana-pro",
         aspect_ratio: str | None = None,
         directorRunId: str | None = None,
         directorEventId: str | None = None,
@@ -1198,6 +1061,10 @@ def register(mcp: FastMCP) -> None:
         outfitStyle, outfitDetails, cinematicGenre, characterArchetype,
         eraSetting`. All optional; the route sanitizes unknown keys.
         """
+        import structlog
+        log = structlog.get_logger(__name__)
+        log.info("studio_casting_model_used", model=model, character_name=character_name)
+
         # Check if the Director run has been cancelled before executing
         if directorRunId and await _is_director_run_cancelled(directorRunId):
             log.info("studio_casting_cancelled", director_run_id=directorRunId)
@@ -1263,177 +1130,6 @@ def register(mcp: FastMCP) -> None:
                     )
                 )
             return result
-        finally:
-            await client.aclose()
-
-    @mcp.tool(name="studio_digital_twin")
-    async def studio_digital_twin(
-        prompt: str,
-        digital_twin_profile_id: str | None = None,
-        enhancement_preset: str | None = None,
-        confirm: bool = False,
-        model: str = "fal-ai/flux/dev",
-        aspect_ratio: str | None = None,
-        directorRunId: str | None = None,
-        directorEventId: str | None = None,
-        directorToolName: str | None = None,
-    ) -> dict:
-        """Generate a portrait using the user's trained Digital Twin LoRA.
-
-        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
-          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
-             `preview` with `estimatedCredits`. Show that cost to the user
-             verbatim and ASK: "You are going to spend X credits. Proceed?".
-          2. Only AFTER the user agrees, re-call with `confirm=True` to
-             actually generate the image. NEVER set `confirm=True` on your
-             own initiative.
-
-        Pass `digital_twin_profile_id` to target a specific trained profile,
-        otherwise the active default profile is used. `enhancement_preset`
-        selects a realism refinement preset (when present).
-        """
-        client = _client()
-        try:
-            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
-            payload = _drop_none({
-                "prompt": prompt,
-                "model": model,
-                "aspect_ratio": aspect_ratio,
-                "useDigitalTwin": True,
-                "digitalTwinProfileId": digital_twin_profile_id,
-                "digitalTwinEnhancementPreset": enhancement_preset,
-                **director_metadata,
-            })
-            result = await _preview_or_run(
-                client,
-                client.generate_image,
-                payload,
-                confirm=confirm,
-                operation_label=f"digital twin · {model}",
-                resolve_kind="image",
-                director_run_id=directorRunId,
-            )
-            # Update brief after successful generation (fire-and-forget)
-            # result can be dict or CallToolResult, handle both
-            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
-            if result_dict.get("ok") is not False and not result_dict.get("preview"):
-                asyncio.create_task(
-                    _update_brief_after_generation(
-                        "studio_digital_twin",
-                        prompt,
-                        result_dict,
-                        directorRunId,
-                    )
-                )
-            return result
-        finally:
-            await client.aclose()
-
-    @mcp.tool(name="studio_ugc_room")
-    async def studio_ugc_room(
-        prompt: str,
-        product_image_url: str | None = None,
-        room_style: str | None = None,
-        confirm: bool = False,
-        model: str = "fal-ai/flux/dev",
-        aspect_ratio: str | None = None,
-        directorRunId: str | None = None,
-        directorEventId: str | None = None,
-        directorToolName: str | None = None,
-    ) -> dict:
-        """UGC-style room scene with product placement.
-
-        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
-          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
-             `preview` with `estimatedCredits`. Show that cost to the user
-             verbatim and ASK: "You are going to spend X credits. Proceed?".
-          2. Only AFTER the user agrees, re-call with `confirm=True` to
-             actually generate the image. NEVER set `confirm=True` on your
-             own initiative.
-
-        `room_style` is a free-form descriptor (e.g. "minimalist bedroom",
-        "cluttered college dorm"). WM Studio's UGC compose-prompt route
-        refines the final prompt downstream.
-
-        IMPORTANT: `product_image_url` MUST be a real URL the user gave you.
-        NEVER fabricate URLs — omit it to receive the upload link.
-        """
-        gate = await _gate_asset_url(
-            product_image_url, asset_kind="image", param="product_image_url", required=True
-        )
-        if gate:
-            return gate
-        client = _client()
-        try:
-            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
-            metadata: dict[str, Any] = {"toolId": "ugc_room"}
-            if room_style:
-                metadata["roomStyle"] = room_style
-            payload = _drop_none({
-                "prompt": prompt,
-                "model": model,
-                "aspect_ratio": aspect_ratio,
-                "imageUrl": product_image_url,
-                "metadata": metadata,
-                **director_metadata,
-            })
-            result = await _preview_or_run(
-                client,
-                client.generate_image,
-                payload,
-                confirm=confirm,
-                operation_label=f"UGC room · {model}",
-                resolve_kind="image",
-                director_run_id=directorRunId,
-            )
-            # Update brief after successful generation (fire-and-forget)
-            # result can be dict or CallToolResult, handle both
-            result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
-            if result_dict.get("ok") is not False and not result_dict.get("preview"):
-                asyncio.create_task(
-                    _update_brief_after_generation(
-                        "studio_ugc_room",
-                        prompt,
-                        result_dict,
-                        directorRunId,
-                    )
-                )
-            return result
-        finally:
-            await client.aclose()
-
-    @mcp.tool(name="studio_convert_to_3d")
-    async def studio_convert_to_3d(
-        image_url: str | None = None,
-        model: str = "fal-ai/meshy/v6/image-to-3d",
-        directorRunId: str | None = None,
-        directorEventId: str | None = None,
-        directorToolName: str | None = None,
-    ) -> dict:
-        """Convert a 2D image into a 3D GLB model (Meshy v6 by default).
-
-        Returns `{ is3D: true, modelGlbUrl, thumbnailUrl, modelUrls, textureUrls }`
-        on success. Meshy v6 is the only 3D model wmstudio currently has a
-        dedicated handler for — other fal 3D endpoints will fail validation.
-
-        IMPORTANT: `image_url` MUST be a real URL the user gave you. NEVER
-        fabricate URLs. If the user has not provided one, omit `image_url`
-        to receive a public upload link to share with them.
-        """
-        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=True)
-        if gate:
-            return gate
-        client = _client()
-        try:
-            director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
-            payload = {
-                "model": model,
-                "imageUrl": image_url,
-                "prompt": "",
-                "metadata": {"toolId": "convert_to_3d", "is3D": True},
-                **director_metadata,
-            }
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
         finally:
             await client.aclose()
 
@@ -1511,6 +1207,10 @@ def register(mcp: FastMCP) -> None:
                 "message": "`n` must be between 1 and 6 frame candidates.",
             }
         resolved_model = model or "fal-ai/nano-banana-pro"
+
+        import structlog
+        log = structlog.get_logger(__name__)
+        log.info("studio_storyboard_frames_model_used", model=resolved_model, n=n)
 
         client = _client()
         try:
@@ -1939,12 +1639,7 @@ def register(mcp: FastMCP) -> None:
     _ = (
         studio_generate_image,
         studio_upscale_image,
-        studio_camera_angles,
-        studio_brandshot,
         studio_casting,
-        studio_digital_twin,
-        studio_ugc_room,
-        studio_convert_to_3d,
         studio_storyboard_frames,
         studio_generate_video,
         studio_video_enhance,

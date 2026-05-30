@@ -78,15 +78,6 @@ def build_samples(image_url: str, video_url: str, twin_id: str | None) -> list[d
             "needs": [],
         },
         {
-            "name": "studio_camera_angles",
-            "arguments": {
-                "prompt": SAMPLE_PROMPT,
-                "camera": "low angle hero shot, 24mm",
-                "aspect_ratio": "9:16",
-            },
-            "needs": [],
-        },
-        {
             "name": "studio_brandshot",
             "arguments": {
                 "prompt": "lifestyle product hero on marble surface",
