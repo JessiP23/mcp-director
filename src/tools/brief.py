@@ -54,12 +54,28 @@ async def _http_request(
             "User-Agent": "mcp-director/brief-tools",
         })
     if resp.status_code >= 400:
-        log.warn("director_brief_http_error", method=method, path=path, status=resp.status_code, body=(resp.text or "")[:400])
-        return {"error": f"HTTP {resp.status_code}", "detail": (resp.text or "").strip()[:400]}
+        log.error(
+            "director_brief_http_error",
+            method=method,
+            path=path,
+            status=resp.status_code,
+            body=(resp.text or "")[:500],
+        )
+        return {
+            "ok": False,
+            "error": f"HTTP {resp.status_code}",
+            "status": resp.status_code,
+            "detail": (resp.text or "").strip()[:500],
+        }
     try:
         return resp.json()
-    except Exception:  # noqa: BLE001
-        return {"error": "Invalid JSON response from wmstudio"}
+    except Exception as exc:  # noqa: BLE001
+        log.error("director_brief_json_parse_error", error=str(exc), response_text=(resp.text or "")[:200])
+        return {
+            "ok": False,
+            "error": "Invalid JSON response from wmstudio",
+            "detail": str(exc),
+        }
 
 
 def _resolve_run_id(directorRunId: str | None, directorEventId: str | None = None, directorToolName: str | None = None) -> str | None:
@@ -101,7 +117,8 @@ def register(mcp: FastMCP) -> None:
         """
         run_id = _resolve_run_id(directorRunId, directorEventId, directorToolName)
         if not run_id:
-            return {"error": "No directorRunId in request — brief tools only work inside a Director run"}
+            log.error("director_brief_read_no_run_id")
+            return {"ok": False, "error": "No directorRunId in request — brief tools only work inside a Director run"}
 
         result = await _http_request(
             "GET",
@@ -110,7 +127,7 @@ def register(mcp: FastMCP) -> None:
         )
         if "error" in result:
             return result
-        return {"brief": result.get("brief")}
+        return {"ok": True, "brief": result.get("brief")}
 
     @mcp.tool(name="director_brief_update")
     async def director_brief_update(
@@ -148,7 +165,8 @@ def register(mcp: FastMCP) -> None:
         """
         run_id = _resolve_run_id(directorRunId, directorEventId, directorToolName)
         if not run_id:
-            return {"error": "No directorRunId in request — brief tools only work inside a Director run"}
+            log.error("director_brief_update_no_run_id")
+            return {"ok": False, "error": "No directorRunId in request — brief tools only work inside a Director run"}
 
         # Parse sections if it's a JSON string (LLM sometimes serializes dicts as strings)
         parsed_sections: dict[str, Any] | None = None
@@ -158,8 +176,8 @@ def register(mcp: FastMCP) -> None:
                     import json
                     parsed_sections = json.loads(sections)
                 except json.JSONDecodeError:
-                    log.warning("director_brief_update_sections_parse_failed", sections=sections[:200])
-                    return {"error": "Invalid JSON in sections parameter"}
+                    log.error("director_brief_update_sections_parse_failed", sections=sections[:200])
+                    return {"ok": False, "error": "Invalid JSON in sections parameter"}
             else:
                 parsed_sections = sections
 
@@ -174,4 +192,4 @@ def register(mcp: FastMCP) -> None:
         result = await _http_request("PATCH", f"/api/director/{run_id}/brief", json=body)
         if "error" in result:
             return result
-        return {"brief": result.get("brief")}
+        return {"ok": True, "brief": result.get("brief")}

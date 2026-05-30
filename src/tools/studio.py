@@ -380,23 +380,23 @@ async def _fetch_image_bytes(url: str) -> tuple[bytes, str] | None:
         ) as http:
             async with http.stream("GET", url) as resp:
                 if resp.status_code != 200:
-                    log.warning("inline_image_bad_status", url=url, status=resp.status_code)
+                    log.error("inline_image_bad_status", url=url, status=resp.status_code)
                     return None
                 content_type = (resp.headers.get("content-type") or "image/png").split(";")[0].strip()
                 if not content_type.startswith("image/"):
-                    log.warning("inline_image_bad_content_type", url=url, ct=content_type)
+                    log.error("inline_image_bad_content_type", url=url, ct=content_type)
                     return None
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
                     if total > _INLINE_IMAGE_MAX_BYTES:
-                        log.warning("inline_image_oversize", url=url, bytes=total)
+                        log.error("inline_image_oversize", url=url, bytes=total)
                         return None
                     chunks.append(chunk)
                 return b"".join(chunks), content_type
     except (httpx.HTTPError, asyncio.TimeoutError) as e:
-        log.warning("inline_image_fetch_failed", url=url, err=str(e)[:200])
+        log.error("inline_image_fetch_failed", url=url, err=str(e)[:200], error_type=type(e).__name__)
         return None
 
 
@@ -421,10 +421,15 @@ async def _render_with_inline_image(structured: dict[str, Any]) -> Any:
         return structured
     url = _extract_image_url(structured)
     if not url:
+        log.warning("inline_render_no_url", structured_keys=list(structured.keys()))
         return structured
     fetched = await _fetch_image_bytes(url)
     if fetched is None:
-        return structured
+        log.error("inline_render_fetch_failed", url=url, structured_keys=list(structured.keys()))
+        # Add error info to structured response so user knows why image isn't showing
+        error_structured = dict(structured)
+        error_structured["_inlineImageError"] = "Failed to fetch image for inline rendering"
+        return error_structured
     data, mime = fetched
     content_blocks: list[Any] = [
         _image_content(data, mime),
@@ -923,6 +928,7 @@ def register(mcp: FastMCP) -> None:
         prompt: str,
         camera: str,
         image_url: str | None = None,
+        confirm: bool = False,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
         directorRunId: str | None = None,
@@ -930,6 +936,14 @@ def register(mcp: FastMCP) -> None:
         directorToolName: str | None = None,
     ) -> dict:
         """Generate an image with an explicit cinematic camera angle.
+
+        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
+          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
+             `preview` with `estimatedCredits`. Show that cost to the user
+             verbatim and ASK: "You are going to spend X credits. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the image. NEVER set `confirm=True` on your
+             own initiative.
 
         `camera` is a free-form descriptor (e.g. "low angle", "dutch tilt",
         "over-the-shoulder"). The WM Studio prompt-engineer composes the
@@ -953,7 +967,15 @@ def register(mcp: FastMCP) -> None:
                 "metadata": {"toolId": "camera_angles", "camera": camera},
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
+            return await _preview_or_run(
+                client,
+                client.generate_image,
+                payload,
+                confirm=confirm,
+                operation_label=f"camera angles · {model}",
+                resolve_kind="image",
+                director_run_id=directorRunId,
+            )
         finally:
             await client.aclose()
 
@@ -962,6 +984,7 @@ def register(mcp: FastMCP) -> None:
         prompt: str,
         product_image_url: str | None = None,
         brand_palette: list[str] | None = None,
+        confirm: bool = False,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
         directorRunId: str | None = None,
@@ -969,6 +992,14 @@ def register(mcp: FastMCP) -> None:
         directorToolName: str | None = None,
     ) -> dict:
         """Brand-consistent product/marketing shot.
+
+        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
+          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
+             `preview` with `estimatedCredits`. Show that cost to the user
+             verbatim and ASK: "You are going to spend X credits. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the image. NEVER set `confirm=True` on your
+             own initiative.
 
         Pass the product image and an optional brand color palette (hex
         strings). IMPORTANT: `product_image_url` MUST be a real URL the
@@ -995,7 +1026,15 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
+            return await _preview_or_run(
+                client,
+                client.generate_image,
+                payload,
+                confirm=confirm,
+                operation_label=f"brandshot · {model}",
+                resolve_kind="image",
+                director_run_id=directorRunId,
+            )
         finally:
             await client.aclose()
 
@@ -1004,6 +1043,7 @@ def register(mcp: FastMCP) -> None:
         character_name: str,
         prompt: str,
         character_profile: dict[str, Any] | str | None = None,
+        confirm: bool = False,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
         directorRunId: str | None = None,
@@ -1011,6 +1051,14 @@ def register(mcp: FastMCP) -> None:
         directorToolName: str | None = None,
     ) -> dict:
         """Generate a character casting shot.
+
+        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
+          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
+             `preview` with `estimatedCredits`. Show that cost to the user
+             verbatim and ASK: "You are going to spend X credits. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the image. NEVER set `confirm=True` on your
+             own initiative.
 
         `character_profile` accepts WM Studio's casting schema keys:
         `characterType, genderIdentity, raceEthnicity, eyeColor, heightCm,
@@ -1061,7 +1109,15 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
+            return await _preview_or_run(
+                client,
+                client.generate_image,
+                payload,
+                confirm=confirm,
+                operation_label=f"character casting · {model}",
+                resolve_kind="image",
+                director_run_id=directorRunId,
+            )
         finally:
             await client.aclose()
 
@@ -1070,6 +1126,7 @@ def register(mcp: FastMCP) -> None:
         prompt: str,
         digital_twin_profile_id: str | None = None,
         enhancement_preset: str | None = None,
+        confirm: bool = False,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
         directorRunId: str | None = None,
@@ -1077,6 +1134,14 @@ def register(mcp: FastMCP) -> None:
         directorToolName: str | None = None,
     ) -> dict:
         """Generate a portrait using the user's trained Digital Twin LoRA.
+
+        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
+          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
+             `preview` with `estimatedCredits`. Show that cost to the user
+             verbatim and ASK: "You are going to spend X credits. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the image. NEVER set `confirm=True` on your
+             own initiative.
 
         Pass `digital_twin_profile_id` to target a specific trained profile,
         otherwise the active default profile is used. `enhancement_preset`
@@ -1094,7 +1159,15 @@ def register(mcp: FastMCP) -> None:
                 "digitalTwinEnhancementPreset": enhancement_preset,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
+            return await _preview_or_run(
+                client,
+                client.generate_image,
+                payload,
+                confirm=confirm,
+                operation_label=f"digital twin · {model}",
+                resolve_kind="image",
+                director_run_id=directorRunId,
+            )
         finally:
             await client.aclose()
 
@@ -1103,6 +1176,7 @@ def register(mcp: FastMCP) -> None:
         prompt: str,
         product_image_url: str | None = None,
         room_style: str | None = None,
+        confirm: bool = False,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
         directorRunId: str | None = None,
@@ -1110,6 +1184,14 @@ def register(mcp: FastMCP) -> None:
         directorToolName: str | None = None,
     ) -> dict:
         """UGC-style room scene with product placement.
+
+        TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
+          1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
+             `preview` with `estimatedCredits`. Show that cost to the user
+             verbatim and ASK: "You are going to spend X credits. Proceed?".
+          2. Only AFTER the user agrees, re-call with `confirm=True` to
+             actually generate the image. NEVER set `confirm=True` on your
+             own initiative.
 
         `room_style` is a free-form descriptor (e.g. "minimalist bedroom",
         "cluttered college dorm"). WM Studio's UGC compose-prompt route
@@ -1137,7 +1219,15 @@ def register(mcp: FastMCP) -> None:
                 "metadata": metadata,
                 **director_metadata,
             })
-            return await _run_billed(client, client.generate_image, payload, resolve_kind="image", director_run_id=directorRunId)
+            return await _preview_or_run(
+                client,
+                client.generate_image,
+                payload,
+                confirm=confirm,
+                operation_label=f"UGC room · {model}",
+                resolve_kind="image",
+                director_run_id=directorRunId,
+            )
         finally:
             await client.aclose()
 
