@@ -1003,7 +1003,7 @@ def register(mcp: FastMCP) -> None:
     async def studio_casting(
         character_name: str,
         prompt: str,
-        character_profile: dict[str, Any] | None = None,
+        character_profile: dict[str, Any] | str | None = None,
         model: str = "fal-ai/flux/dev",
         aspect_ratio: str | None = None,
         directorRunId: str | None = None,
@@ -1030,13 +1030,29 @@ def register(mcp: FastMCP) -> None:
 
         client = _client()
         try:
+            # Parse character_profile if it's a JSON string (LLM sometimes serializes dicts as strings)
+            parsed_profile: dict[str, Any] | None = None
+            if character_profile is not None:
+                if isinstance(character_profile, str):
+                    try:
+                        import json
+                        parsed_profile = json.loads(character_profile)
+                    except json.JSONDecodeError:
+                        log.warning("studio_casting_profile_parse_failed", character_profile=character_profile[:200])
+                        return {
+                            "ok": False,
+                            "error": "Invalid JSON in character_profile parameter",
+                        }
+                else:
+                    parsed_profile = character_profile
+
             director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             metadata: dict[str, Any] = {
                 "toolId": "casting",
                 "characterName": character_name,
             }
-            if character_profile:
-                metadata["characterProfile"] = character_profile
+            if parsed_profile:
+                metadata["characterProfile"] = parsed_profile
             payload = _drop_none({
                 "prompt": prompt,
                 "userPrompt": character_name,

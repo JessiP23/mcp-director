@@ -114,7 +114,7 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="director_brief_update")
     async def director_brief_update(
-        sections: dict[str, Any] | None = None,
+        sections: dict[str, Any] | str | None = None,
         summary: str | None = None,
         reason: str | None = None,
         directorRunId: str | None = None,
@@ -150,9 +150,22 @@ def register(mcp: FastMCP) -> None:
         if not run_id:
             return {"error": "No directorRunId in request — brief tools only work inside a Director run"}
 
-        body: dict[str, Any] = {"directorRunId": run_id}
+        # Parse sections if it's a JSON string (LLM sometimes serializes dicts as strings)
+        parsed_sections: dict[str, Any] | None = None
         if sections is not None:
-            body["sections"] = sections
+            if isinstance(sections, str):
+                try:
+                    import json
+                    parsed_sections = json.loads(sections)
+                except json.JSONDecodeError:
+                    log.warning("director_brief_update_sections_parse_failed", sections=sections[:200])
+                    return {"error": "Invalid JSON in sections parameter"}
+            else:
+                parsed_sections = sections
+
+        body: dict[str, Any] = {"directorRunId": run_id}
+        if parsed_sections is not None:
+            body["sections"] = parsed_sections
         if summary is not None:
             body["summary"] = summary
         if reason is not None:
