@@ -68,6 +68,12 @@ async def _save_character_asset(
         # Get user_id from request state for RLS policy compliance
         request = get_http_request()
         user_id = getattr(request.state, "user_id", None)
+        log.info(
+            "character_asset_user_id_check",
+            director_run_id=director_run_id,
+            has_user_id=user_id is not None,
+            user_id=user_id,
+        )
 
         settings = get_settings()
         supabase_url = settings.supabase_url.rstrip("/")
@@ -177,8 +183,17 @@ async def _update_brief_after_generation(
             if not character_name:
                 metadata = result.get("metadata", {})
                 character_name = metadata.get("characterName") or result.get("userPrompt", "Unknown character")
+            
+            # Extract image URL from result
+            image_url = result.get("imageUrl") or result.get("image_url")
+            
+            # Build character data with image URL
+            character_data = {"prompt": prompt}
+            if image_url:
+                character_data["imageUrl"] = image_url
+            
             brief_update["sections"] = {
-                "characters": {character_name: prompt}
+                "characters": {character_name: character_data}
             }
             log.info(
                 "brief_update_casting_payload",
