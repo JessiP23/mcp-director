@@ -40,6 +40,66 @@ def _wmstudio_base_url() -> str:
     return settings.wmstudio_api_url.rstrip("/")
 
 
+async def _emit_asset_event(
+    director_run_id: str,
+    director_event_id: str,
+    asset_type: str,
+    name: str,
+    image_url: str,
+    prompt: str,
+) -> None:
+    """Emit a director event for asset generation so it shows in the brief asset tab."""
+    try:
+        settings = get_settings()
+        supabase_url = settings.supabase_url.rstrip("/")
+        supabase_anon_key = settings.supabase_anon_key
+
+        url = f"{supabase_url}/rest/v1/director_events"
+        payload = {
+            "run_id": director_run_id,
+            "event_type": "asset.generated",
+            "payload_json": {
+                "asset_type": asset_type,
+                "name": name,
+                "image_url": image_url,
+                "prompt": prompt,
+                "director_event_id": director_event_id,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "apikey": supabase_anon_key,
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+            )
+            if resp.status_code >= 400:
+                log.warning(
+                    "asset_event_emit_failed",
+                    director_run_id=director_run_id,
+                    status=resp.status_code,
+                    response_body=(resp.text or "")[:200],
+                )
+            else:
+                log.info(
+                    "asset_event_emit_success",
+                    director_run_id=director_run_id,
+                    asset_type=asset_type,
+                    name=name,
+                )
+    except Exception as exc:
+        log.error(
+            "asset_event_emit_error",
+            director_run_id=director_run_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
 async def _save_character_asset(
     character_name: str,
     prompt: str,
@@ -135,6 +195,15 @@ async def _save_character_asset(
                     director_run_id=director_run_id,
                     director_event_id=director_event_id,
                     character_name=character_name,
+                )
+                # Emit event so asset shows in brief asset tab
+                await _emit_asset_event(
+                    director_run_id=director_run_id,
+                    director_event_id=director_event_id,
+                    asset_type="character",
+                    name=character_name,
+                    image_url=image_url,
+                    prompt=prompt,
                 )
     except Exception as exc:  # noqa: BLE001
         log.error(
@@ -882,7 +951,7 @@ async def _resolve_queued_job(
     job_id: str,
     *,
     director_run_id: str | None = None,
-    timeout_s: float = 60.0,
+    timeout_s: float = 180.0,
     initial_wait_s: float = 2.0,
     max_wait_s: float = 8.0,
 ) -> dict[str, Any]:
@@ -919,6 +988,14 @@ async def _resolve_queued_job(
             raise WMStudioClientError(
                 502, f"queued generation {status}: {err}", payload=last
             )
+        # Log provider_requested status to track stuck jobs
+        if status == "provider_requested":
+            log.warning(
+                "queued_generation_still_provider_requested",
+                job_id=job_id,
+                elapsed_s=asyncio.get_event_loop().time() - (deadline - timeout_s),
+                timeout_remaining_s=deadline - asyncio.get_event_loop().time(),
+            )
         if asyncio.get_event_loop().time() >= deadline:
             raise WMStudioClientError(
                 504,
@@ -937,7 +1014,7 @@ async def _resolve_generation_response(
     *,
     kind: str,
     director_run_id: str | None = None,
-    timeout_s: float = 60.0,
+    timeout_s: float = 180.0,
 ) -> dict[str, Any]:
     """Normalize an inline OR queued generate-* response into one with the
     asset URL populated under the right key (`imageUrl` for kind="image",
@@ -1029,10 +1106,10 @@ def register(mcp: FastMCP) -> None:
         prompt: str,
         aspect_ratio: str,
         confirm: bool = False,
-        model: str = "openai/gpt-image-2",
+        model: str = "fal-ai/nano-banana-pro",
         negative_prompt: str | None = None,
         num_images: int | None = None,
-        seed: int | None = None,
+        seed: Any = None,
         directorRunId: str | None = None,
         directorEventId: str | None = None,
         directorToolName: str | None = None,
@@ -1058,7 +1135,7 @@ def register(mcp: FastMCP) -> None:
              actually generate the image. NEVER set `confirm=True` on your
              own initiative.
 
-        Defaults to `openai/gpt-image-2` (general purpose/typography).
+        Defaults to `fal-ai/nano-banana-pro` (fast, reliable image generation).
         Returns `{ imageUrl, images, generationId, requestId, creditsCharged,
         creditsRemaining }` on success.
         """
@@ -1071,12 +1148,23 @@ def register(mcp: FastMCP) -> None:
             seed = None
         if aspect_ratio is False:
             aspect_ratio = None
-        
+
         # Clean up empty strings that should be None (LLM sometimes passes empty strings instead of omitting)
         if negative_prompt == "":
             negative_prompt = None
         if model == "":
             model = None
+
+        # Handle seed parameter - convert string "random" or other non-integer values to None
+        if isinstance(seed, str):
+            if seed.lower() == "random" or seed == "":
+                seed = None
+            else:
+                try:
+                    seed = int(seed)
+                except (ValueError, TypeError):
+                    log.warning("studio_generate_image_invalid_seed_string", seed=seed)
+                    seed = None
 
         if not aspect_ratio or ":" not in aspect_ratio:
             return {
@@ -1091,7 +1179,7 @@ def register(mcp: FastMCP) -> None:
             }
 
         # Default model
-        resolved_model = model or "openai/gpt-image-2"
+        resolved_model = model or "fal-ai/nano-banana-pro"
 
         import structlog
         log = structlog.get_logger(__name__)
@@ -1201,6 +1289,18 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Generate a character casting shot.
 
+        CHARACTER SHEET REQUIREMENTS (FIXED - do not change):
+          - Must generate a 3x1 grid with 3 panels: macro (close-up), side profile, full body
+          - Fixed aspect ratio: 16:9 for the overall sheet
+          - Each panel shows the character from a different angle
+          - Use specific character details from character_profile
+
+        Your prompt should describe the character and specify the 3-panel layout:
+        "Character name: X, appearance: Y. Generate a 3x1 character sheet with:
+         Panel 1 (macro): Close-up face shot showing expression and details
+         Panel 2 (side): Side profile view showing facial structure
+         Panel 3 (full): Full body shot showing pose and outfit"
+
         TWO-PHASE CONFIRMATION (REQUIRED — do not skip):
           1. Call this tool WITHOUT `confirm` (or `confirm=False`) → returns a
              `preview` with `estimatedCredits`. Show that cost to the user
@@ -1254,14 +1354,17 @@ def register(mcp: FastMCP) -> None:
             }
             if parsed_profile:
                 metadata["characterProfile"] = parsed_profile
+            # Force 16:9 aspect ratio for character sheets (3x1 panels)
+            final_aspect_ratio = aspect_ratio or "16:9"
             payload = _drop_none({
                 "prompt": prompt,
                 "userPrompt": character_name,
                 "model": model,
-                "aspect_ratio": aspect_ratio,
+                "aspect_ratio": final_aspect_ratio,
                 "metadata": metadata,
                 **director_metadata,
             })
+            log.info("studio_casting_aspect_ratio", aspect_ratio=final_aspect_ratio)
             result = await _preview_or_run(
                 client,
                 client.generate_image,
@@ -1338,7 +1441,7 @@ def register(mcp: FastMCP) -> None:
         n: int = 3,
         model: str | None = None,
         negative_prompt: str | None = None,
-        seed: int | None = None,
+        seed: Any = None,
         directorRunId: str | None = None,
         directorEventId: str | None = None,
         directorToolName: str | None = None,
@@ -1408,6 +1511,17 @@ def register(mcp: FastMCP) -> None:
             seed = None
         if model == "":
             model = None
+
+        # Handle seed parameter - convert string "random" or other non-integer values to None
+        if isinstance(seed, str):
+            if seed.lower() == "random" or seed == "":
+                seed = None
+            else:
+                try:
+                    seed = int(seed)
+                except (ValueError, TypeError):
+                    log.warning("studio_storyboard_frames_invalid_seed_string", seed=seed)
+                    seed = None
         
         resolved_model = model or "fal-ai/nano-banana-pro"
 
@@ -1743,16 +1857,37 @@ def register(mcp: FastMCP) -> None:
     # ---------- Lifecycle ----------
 
     @mcp.tool(name="studio_job_status")
-    async def studio_job_status(job_id: str) -> dict:
+    async def studio_job_status(
+        job_id: str,
+        directorRunId: str | None = None,
+    ) -> dict:
         """Get the current snapshot of an async generation job.
 
         Returns `{ id, status, progress, step, type, model, resultUrl,
         error, createdAt, updatedAt, events }`. Status values:
         `queued | processing | completed | failed | cancelled`.
+
+        If the job is stuck in "provider_requested" for a long time, it may be
+        a fal.ai queue issue. Try again or use a different model.
         """
         client = _client()
         try:
-            return await client.get_job(job_id)
+            snapshot = await client.get_job(job_id, director_run_id=directorRunId)
+            status = snapshot.get("status") if isinstance(snapshot, dict) else None
+
+            # Add helpful context for stuck jobs
+            if status == "provider_requested":
+                log.warning(
+                    "job_stuck_in_provider_requested",
+                    job_id=job_id,
+                    director_run_id=directorRunId,
+                )
+                return {
+                    **snapshot,
+                    "_warning": "Job is stuck in provider_requested state. This may be a fal.ai queue issue. Consider retrying with a different model.",
+                }
+
+            return snapshot
         finally:
             await client.aclose()
 

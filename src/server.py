@@ -16,6 +16,7 @@ from src.middleware.auth_guard import AuthGuardMiddleware
 from src.resources.templates import register_resources
 from src.tools import assets, creative, insights, pipeline, studio, brief, reference_descriptions
 from src.tools.registry import registry
+from src.orchestrator import get_orchestrator, AgentMode
 
 log = structlog.get_logger(__name__)
 
@@ -34,29 +35,42 @@ structlog.configure(
 mcp = FastMCP(
     "director-mcp",
     instructions=(
-        "You are a video production agent powered by WM Studio. You generate videos through a "
-        "structured storyboard-first workflow. Videos and frames render inline in this chat — "
-        "never output raw URLs as the primary result, never use markdown image syntax for "
-        "frames or video. The MCP App viewer handles all visual rendering automatically.\n\n"
-        "WORKFLOW — FOLLOW THIS ORDER EXACTLY, EVERY TIME:\n"
-        "  [1] Ask for aspect ratio (REQUIRED first step — do not call any tool until answered)\n"
-        "  [2] studio_storyboard_frames(prompt, aspect_ratio, n=3, confirm=false) — cost preview only\n"
+        "You are a video production agent powered by WM Studio with an orchestrator system.\n\n"
+        "ORCHESTRATOR MODE:\n"
+        "  The system uses an orchestrator to coordinate specialized agents:\n"
+        "  - Casting Agent: Character sheets (3x1 panels, 16:9 aspect ratio)\n"
+        "  - Storyboard Agent: Frame candidates for scenes\n"
+        "  - Video Agent: Video generation from storyboard frames\n"
+        "  - Reference Manager: Tracks characters, locations, props for consistency\n\n"
+        "AUTO-CONTINUATION:\n"
+        "  When the orchestrator is in AUTO mode, continue automatically after each action.\n"
+        "  When in ASK mode, wait for user confirmation before continuing.\n"
+        "  Current mode is determined by the user's initial request or explicit setting.\n\n"
+        "CHARACTER SHEETS (Casting):\n"
+        "  - Must generate 3x1 grid with 3 panels: macro (close-up), side profile, full body\n"
+        "  - Fixed aspect ratio: 16:9 for the overall sheet\n"
+        "  - Use studio_casting tool with character details\n"
+        "  - Characters are automatically stored for later scene reference\n\n"
+        "STORYBOARD WORKFLOW:\n"
+        "  [1] Ask for aspect ratio (REQUIRED first step)\n"
+        "  [2] studio_storyboard_frames(prompt, aspect_ratio, n=3, confirm=false) — cost preview\n"
         "  [3] Show estimatedCredits, ask 'Proceed?', wait for explicit yes\n"
-        "  [4] studio_storyboard_frames(... confirm=true) — generates frames, viewer renders them inline\n"
-        "  [5] Wait for user to click a frame or type a number (1/2/3)\n"
-        "  [6] studio_generate_video(prompt, image_url=<chosen>, confirm=false) — cost preview only\n"
-        "  [7] Show estimatedCredits, ask 'Proceed?', wait for explicit yes\n"
-        "  [8] studio_generate_video(... confirm=true) — generates video, player renders it inline\n"
-        "  [9] Confirm: model, duration, resolution, credits used/remaining. Offer next steps.\n\n"
+        "  [4] studio_storyboard_frames(... confirm=true) — generates frames\n"
+        "  [5] Wait for user to choose a frame (click or type number)\n"
+        "  [6] If characters exist in memory, include them in scene prompts\n\n"
+        "VIDEO GENERATION:\n"
+        "  [1] studio_generate_video(prompt, image_url=<chosen frame>, confirm=false)\n"
+        "  [2] Show estimatedCredits, ask 'Proceed?', wait for explicit yes\n"
+        "  [3] studio_generate_video(... confirm=true) — generates video\n\n"
         "HARD RULES:\n"
-        "  - STORYBOARD FIRST, ALWAYS. Never call studio_generate_video without image_url.\n"
-        "    Escape hatch: allow_text_to_video=True only on explicit user request.\n"
+        "  - STORYBOARD FIRST. Never call studio_generate_video without image_url.\n"
         "  - ALWAYS PREVIEW BEFORE CHARGING. confirm=false first, show cost, wait for approval.\n"
+        "  - CHARACTER CONSISTENCY. When scenes include known characters, reference them.\n"
         "  - NEVER FABRICATE DATA. No invented URLs, IDs, credit amounts, or frame counts.\n"
-        "  - INLINE RENDERING ONLY. The MCP App viewer renders everything. Trust it.\n"
+        "  - INLINE RENDERING. The MCP App viewer renders everything. Trust it.\n"
         "  - CREDITS TRANSPARENCY. Show creditsCharged + creditsRemaining after each generation.\n"
+        "  - ASSETS IN BRIEF. Generated assets automatically appear in the brief asset tab.\n"
         "  - TOOL ERRORS. Report exact error, do not retry silently.\n"
-        "See director://prompts/video-workflow for the full policy."
     ),
     version="1.0.0",
     middleware=[
@@ -73,7 +87,25 @@ insights.register(mcp)
 studio.register(mcp)
 brief.register(mcp)
 reference_descriptions.register(mcp)
+from src.tools import orchestrator_tools
+orchestrator_tools.register(mcp)
 register_resources(mcp)
+
+# Initialize orchestrator and register agents
+from src.agents import CastingAgent, StoryboardAgent, VideoAgent, ReferenceManager
+
+orchestrator = get_orchestrator()
+orchestrator.set_mode(AgentMode.ASK)  # Default to ASK mode for safety
+orchestrator.register_agent("casting", CastingAgent())
+orchestrator.register_agent("storyboard", StoryboardAgent())
+orchestrator.register_agent("video", VideoAgent())
+orchestrator.register_agent("reference_manager", ReferenceManager())
+
+# Set orchestrator reference for each agent
+for agent in orchestrator.agents.values():
+    agent.set_orchestrator(orchestrator)
+
+log.info("orchestrator_initialized", mode=orchestrator.mode.value, agents=list(orchestrator.agents.keys()))
 
 # Discover and load plugins
 registry.discover_plugins()
