@@ -40,11 +40,112 @@ def _wmstudio_base_url() -> str:
     return settings.wmstudio_api_url.rstrip("/")
 
 
+async def _save_character_asset(
+    character_name: str,
+    prompt: str,
+    character_profile: dict[str, Any] | None,
+    result: dict[str, Any],
+    director_run_id: str,
+    director_event_id: str,
+    model: str,
+) -> None:
+    """Save character asset to the character_assets table after successful generation.
+
+    This is called synchronously after studio_casting generations to persist
+    character assets for later reference. Errors are logged but don't fail
+    the generation flow.
+
+    Uses direct Supabase REST API with anon key only.
+    """
+    log.info(
+        "character_asset_save_called",
+        character_name=character_name,
+        director_run_id=director_run_id,
+        director_event_id=director_event_id,
+    )
+
+    try:
+        # Get user_id from request state for RLS policy compliance
+        request = get_http_request()
+        user_id = getattr(request.state, "user_id", None)
+
+        settings = get_settings()
+        supabase_url = settings.supabase_url.rstrip("/")
+        supabase_anon_key = settings.supabase_anon_key
+
+        # Extract image URL from result
+        image_url = result.get("imageUrl") or result.get("image_url")
+        generation_id = result.get("generationId") or result.get("id")
+
+        # Use Supabase REST API to insert character asset
+        url = f"{supabase_url}/rest/v1/character_assets"
+        payload = {
+            "user_id": user_id,
+            "director_run_id": director_run_id,
+            "director_event_id": director_event_id,
+            "character_name": character_name,
+            "character_profile": character_profile or {},
+            "prompt": prompt,
+            "model_endpoint": model,
+            "generation_id": generation_id,
+            "image_url": image_url,
+            "output_metadata": result,
+        }
+
+        log.info(
+            "character_asset_sending_supabase_request",
+            url=url,
+            payload_keys=list(payload.keys()),
+            has_image_url=bool(image_url),
+        )
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "apikey": supabase_anon_key,
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+            )
+            log.info(
+                "character_asset_supabase_response_received",
+                status_code=resp.status_code,
+                response_body=(resp.text or "")[:500],
+            )
+
+            if resp.status_code >= 400:
+                log.warning(
+                    "character_asset_save_failed",
+                    director_run_id=director_run_id,
+                    director_event_id=director_event_id,
+                    status=resp.status_code,
+                    response_body=(resp.text or "")[:200],
+                )
+            else:
+                log.info(
+                    "character_asset_save_success",
+                    director_run_id=director_run_id,
+                    director_event_id=director_event_id,
+                    character_name=character_name,
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            "character_asset_save_error",
+            director_run_id=director_run_id,
+            director_event_id=director_event_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
 async def _update_brief_after_generation(
     tool_name: str,
     prompt: str,
     result: dict[str, Any],
     director_run_id: str | None = None,
+    character_name: str | None = None,
 ) -> None:
     """Update the production brief after a successful generation.
 
@@ -52,7 +153,16 @@ async def _update_brief_after_generation(
     the brief in sync with what's being created. Errors are logged but
     don't fail the generation flow.
     """
+    log.info(
+        "brief_update_called",
+        tool=tool_name,
+        director_run_id=director_run_id,
+        has_director_run_id=bool(director_run_id),
+        character_name=character_name,
+    )
+
     if not director_run_id:
+        log.warning("brief_update_skipped_no_director_run_id", tool=tool_name)
         return
 
     try:
@@ -63,10 +173,19 @@ async def _update_brief_after_generation(
 
         # Add tool-specific information to brief sections
         if tool_name == "studio_casting":
-            character_name = result.get("userPrompt", "Unknown character")
+            # Use provided character_name, or try to extract from metadata/userPrompt
+            if not character_name:
+                metadata = result.get("metadata", {})
+                character_name = metadata.get("characterName") or result.get("userPrompt", "Unknown character")
             brief_update["sections"] = {
                 "characters": {character_name: prompt}
             }
+            log.info(
+                "brief_update_casting_payload",
+                character_name=character_name,
+                prompt_length=len(prompt),
+                sections=brief_update.get("sections"),
+            )
         elif tool_name == "studio_generate_image":
             brief_update["sections"] = {
                 "visualLanguage": f"Generated image: {prompt[:200]}"
@@ -90,6 +209,14 @@ async def _update_brief_after_generation(
 
         # Make async HTTP request to brief API
         url = f"{_wmstudio_base_url()}/api/director/{director_run_id}/brief"
+        log.info(
+            "brief_update_sending_request",
+            tool=tool_name,
+            director_run_id=director_run_id,
+            url=url,
+            payload_keys=list(brief_update.keys()),
+        )
+
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
             resp = await client.patch(
                 url,
@@ -103,6 +230,14 @@ async def _update_brief_after_generation(
                     "User-Agent": "mcp-director/studio-tools",
                 },
             )
+            log.info(
+                "brief_update_response_received",
+                tool=tool_name,
+                director_run_id=director_run_id,
+                status_code=resp.status_code,
+                response_body=(resp.text or "")[:500],
+            )
+
             if resp.status_code >= 400:
                 log.warning(
                     "brief_update_after_generation_failed",
@@ -1113,21 +1248,59 @@ def register(mcp: FastMCP) -> None:
                 client.generate_image,
                 payload,
                 confirm=confirm,
-                operation_label=f"character casting · {model}",
+                operation_label=f"character casting",
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
             # Update brief after successful generation (fire-and-forget)
             # result can be dict or CallToolResult, handle both
             result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
+            log.info(
+                "studio_casting_result_received",
+                ok=result_dict.get("ok"),
+                preview=result_dict.get("preview"),
+                has_director_run_id=bool(directorRunId),
+                director_run_id=directorRunId,
+                result_keys=list(result_dict.keys())[:20],
+            )
             if result_dict.get("ok") is not False and not result_dict.get("preview"):
+                log.info(
+                    "studio_casting_scheduling_brief_update",
+                    director_run_id=directorRunId,
+                    character_name=character_name,
+                )
                 asyncio.create_task(
                     _update_brief_after_generation(
                         "studio_casting",
                         prompt,
                         result_dict,
                         directorRunId,
+                        character_name=character_name,
                     )
+                )
+                # Also save to character_assets table (synchronous call)
+                if directorRunId and directorEventId:
+                    log.info(
+                        "studio_casting_saving_character_asset",
+                        director_run_id=directorRunId,
+                        director_event_id=directorEventId,
+                        character_name=character_name,
+                    )
+                    await _save_character_asset(
+                        character_name=character_name,
+                        prompt=prompt,
+                        character_profile=parsed_profile,
+                        result=result_dict,
+                        director_run_id=directorRunId,
+                        director_event_id=directorEventId,
+                        model=model,
+                    )
+            else:
+                log.warning(
+                    "studio_casting_skipping_brief_update",
+                    ok=result_dict.get("ok"),
+                    preview=result_dict.get("preview"),
+                    reason="result not ok or is preview",
                 )
             return result
         finally:
