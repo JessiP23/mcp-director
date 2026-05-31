@@ -187,13 +187,13 @@ async def _update_brief_after_generation(
             # Extract image URL from result
             image_url = result.get("imageUrl") or result.get("image_url")
             
-            # Build character data with image URL
-            character_data = {"prompt": prompt}
+            # Build character description as readable markdown with image
+            character_description = prompt
             if image_url:
-                character_data["imageUrl"] = image_url
+                character_description += f"\n\n![{character_name}]({image_url})"
             
             brief_update["sections"] = {
-                "characters": {character_name: character_data}
+                "characters": {character_name: character_description}
             }
             log.info(
                 "brief_update_casting_payload",
