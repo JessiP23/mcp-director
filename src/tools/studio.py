@@ -202,8 +202,12 @@ async def _update_brief_after_generation(
                 sections=brief_update.get("sections"),
             )
         elif tool_name == "studio_generate_image":
+            image_url = result.get("imageUrl") or result.get("image_url")
+            visual_text = f"Generated image: {prompt[:200]}"
+            if image_url:
+                visual_text += f"\n\n![Generated image]({image_url})"
             brief_update["sections"] = {
-                "visualLanguage": f"Generated image: {prompt[:200]}"
+                "visualLanguage": visual_text
             }
         elif tool_name == "studio_camera_angles":
             brief_update["sections"] = {
@@ -1025,8 +1029,7 @@ def register(mcp: FastMCP) -> None:
         prompt: str,
         aspect_ratio: str,
         confirm: bool = False,
-        model: str | None = None,
-        image_url: str | None = None,
+        model: str = "openai/gpt-image-2",
         negative_prompt: str | None = None,
         num_images: int | None = None,
         seed: int | None = None,
@@ -1051,25 +1054,25 @@ def register(mcp: FastMCP) -> None:
              actually generate the image. NEVER set `confirm=True` on your
              own initiative.
 
-        Defaults to `openai/gpt-image-2` (general purpose/typography), auto-switching
-        to `openai/gpt-image-2/edit` when `image_url` is provided.
+        Defaults to `openai/gpt-image-2` (general purpose/typography).
         Returns `{ imageUrl, images, generationId, requestId, creditsCharged,
         creditsRemaining }` on success.
-
-        If `image_url` is provided it MUST be a real URL the user gave you;
-        never fabricate one.
         """
         # Clean up False values that should be None (happens after cancellation)
         if model is False:
             model = None
-        if image_url is False:
-            image_url = None
         if negative_prompt is False:
             negative_prompt = None
         if seed is False:
             seed = None
         if aspect_ratio is False:
             aspect_ratio = None
+        
+        # Clean up empty strings that should be None (LLM sometimes passes empty strings instead of omitting)
+        if negative_prompt == "":
+            negative_prompt = None
+        if model == "":
+            model = None
 
         if not aspect_ratio or ":" not in aspect_ratio:
             return {
@@ -1082,18 +1085,13 @@ def register(mcp: FastMCP) -> None:
                     "their choice as `aspect_ratio` (e.g. \"16:9\")."
                 ),
             }
-        gate = await _gate_asset_url(image_url, asset_kind="image", param="image_url", required=False)
-        if gate:
-            return gate
 
-        # Default model: edit variant for img2img, base variant for t2i.
-        resolved_model = model or (
-            "openai/gpt-image-2/edit" if image_url else "openai/gpt-image-2"
-        )
+        # Default model
+        resolved_model = model or "openai/gpt-image-2"
 
         import structlog
         log = structlog.get_logger(__name__)
-        log.info("studio_generate_image_model_used", model=resolved_model, image_url=image_url)
+        log.info("studio_generate_image_model_used", model=resolved_model)
 
         client = _client()
         try:
@@ -1102,7 +1100,6 @@ def register(mcp: FastMCP) -> None:
                 "prompt": prompt,
                 "model": resolved_model,
                 "aspect_ratio": aspect_ratio,
-                "imageUrl": image_url,
                 "negative_prompt": negative_prompt,
                 "num_images": num_images,
                 "seed": seed,
@@ -1394,6 +1391,15 @@ def register(mcp: FastMCP) -> None:
                 "error": "usage",
                 "message": "`n` must be between 1 and 6 frame candidates.",
             }
+        
+        # Clean up empty strings that should be None (LLM sometimes passes empty strings instead of omitting)
+        if negative_prompt == "":
+            negative_prompt = None
+        if seed == "":
+            seed = None
+        if model == "":
+            model = None
+        
         resolved_model = model or "fal-ai/nano-banana-pro"
 
         import structlog
