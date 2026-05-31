@@ -882,7 +882,7 @@ async def _resolve_queued_job(
     job_id: str,
     *,
     director_run_id: str | None = None,
-    timeout_s: float = 180.0,
+    timeout_s: float = 60.0,
     initial_wait_s: float = 2.0,
     max_wait_s: float = 8.0,
 ) -> dict[str, Any]:
@@ -937,7 +937,7 @@ async def _resolve_generation_response(
     *,
     kind: str,
     director_run_id: str | None = None,
-    timeout_s: float = 180.0,
+    timeout_s: float = 60.0,
 ) -> dict[str, Any]:
     """Normalize an inline OR queued generate-* response into one with the
     asset URL populated under the right key (`imageUrl` for kind="image",
@@ -1037,7 +1037,11 @@ def register(mcp: FastMCP) -> None:
         directorEventId: str | None = None,
         directorToolName: str | None = None,
     ) -> dict:
-        """Generate an image with WM Studio via fal.ai.
+        """Generate a SINGLE image with WM Studio via fal.ai.
+
+        USE THIS TOOL for simple image generation requests. Do NOT use this
+        for video preparation - use studio_storyboard_frames only when the
+        user explicitly asks for video or storyboard frames.
 
         ASPECT RATIO (REQUIRED — ask the user before calling):
           You MUST ask the user which aspect ratio they want BEFORE calling
@@ -1094,6 +1098,7 @@ def register(mcp: FastMCP) -> None:
         log.info("studio_generate_image_model_used", model=resolved_model)
 
         client = _client()
+        log.info("studio_generate_image_starting", prompt_length=len(prompt))
         try:
             director_metadata = _extract_director_metadata(directorRunId, directorEventId, directorToolName)
             payload = _drop_none({
@@ -1105,6 +1110,7 @@ def register(mcp: FastMCP) -> None:
                 "seed": seed,
                 **director_metadata,
             })
+            log.info("studio_generate_image_calling_api", confirm=confirm)
             result = await _preview_or_run(
                 client,
                 client.generate_image,
@@ -1114,6 +1120,7 @@ def register(mcp: FastMCP) -> None:
                 resolve_kind="image",
                 director_run_id=directorRunId,
             )
+            log.info("studio_generate_image_api_response", has_result=bool(result), is_preview=result.get("preview") if isinstance(result, dict) else False)
             # Update brief after successful generation (fire-and-forget)
             # result can be dict or CallToolResult, handle both
             result_dict = result if isinstance(result, dict) else (result.structuredContent if hasattr(result, "structuredContent") else {})
@@ -1336,10 +1343,12 @@ def register(mcp: FastMCP) -> None:
         directorEventId: str | None = None,
         directorToolName: str | None = None,
     ) -> dict:
-        """Generate N image FRAME CANDIDATES for the user to choose from
-        before running a video generation.
+        """Generate N image FRAME CANDIDATES for VIDEO PREPARATION ONLY.
 
-        REQUIRED FIRST STEP FOR VIDEO REQUESTS. Whenever the user asks for a
+        DO NOT use this tool for simple image generation. Use studio_generate_image
+        instead when the user just wants to generate an image.
+
+        REQUIRED FIRST STEP FOR VIDEO REQUESTS ONLY. Whenever the user asks for a
         video, you MUST call this tool first to produce 2–4 still-frame
         options, present every returned `imageUrl` to the user, ask which
         ONE they want animated, and ONLY THEN call `studio_generate_video`
@@ -1395,7 +1404,7 @@ def register(mcp: FastMCP) -> None:
         # Clean up empty strings that should be None (LLM sometimes passes empty strings instead of omitting)
         if negative_prompt == "":
             negative_prompt = None
-        if seed == "":
+        if seed == "" or seed is False:
             seed = None
         if model == "":
             model = None
