@@ -1135,7 +1135,7 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="studio_upscale_image")
     async def studio_upscale_image(
-        image_url: str | None = None,
+        image_url: str,
         upscale_factor: int = 2,
         model: str = "fal-ai/topaz/upscale/image",
         topaz_model: str = "Standard V2",
@@ -1694,7 +1694,7 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(name="studio_video_enhance")
     async def studio_video_enhance(
-        video_url: str | None = None,
+        video_url: str,
         upscale_factor: int = 2,
         target_fps: int | None = None,
         model: str = "fal-ai/topaz/upscale/video",
